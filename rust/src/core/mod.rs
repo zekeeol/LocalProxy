@@ -833,22 +833,8 @@ pub(crate) fn confirm_host_key(id: &str, fingerprint: &str, accepted: bool) -> R
         .map_err(|_| "SSH 连接已结束".to_string())
 }
 
-pub(crate) fn events(sink: crate::frb_generated::StreamSink<ProxyEvent>) {
-    let receiver = controller().events.subscribe();
-    runtime().spawn(async move {
-        let mut receiver = receiver;
-        loop {
-            match receiver.recv().await {
-                Ok(event) => {
-                    if sink.add(event).is_err() {
-                        break;
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => break,
-            }
-        }
-    });
+pub(crate) fn subscribe_events() -> broadcast::Receiver<ProxyEvent> {
+    controller().events.subscribe()
 }
 
 pub(crate) fn upgrade(weak: &Weak<AppController>) -> Result<Arc<AppController>, String> {

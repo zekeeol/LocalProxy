@@ -1,4 +1,3 @@
-use crate::frb_generated::StreamSink;
 use serde::{Deserialize, Serialize};
 
 use crate::core;
@@ -188,57 +187,46 @@ pub struct ProxyEvent {
     pub endpoints: Vec<Endpoint>,
 }
 
-#[flutter_rust_bridge::frb(init)]
 pub fn init_app() {
     core::init();
 }
 
-#[flutter_rust_bridge::frb(sync)]
 pub fn list_profiles() -> Result<Vec<ProfileSummary>, String> {
     core::list_profiles()
 }
 
-#[flutter_rust_bridge::frb(sync)]
 pub fn get_profile(id: String) -> Result<ProfileView, String> {
     core::get_profile(&id)
 }
 
-#[flutter_rust_bridge::frb(sync)]
 pub fn get_settings() -> Result<AppSettingsView, String> {
     core::get_settings()
 }
 
-#[flutter_rust_bridge::frb(sync)]
 pub fn save_settings(settings: AppSettingsDraft) -> Result<AppSettingsView, String> {
     core::save_settings(settings)
 }
 
-#[flutter_rust_bridge::frb(sync)]
 pub fn save_profile(draft: ProfileDraft) -> Result<ProfileView, String> {
     core::save_profile(draft)
 }
 
-#[flutter_rust_bridge::frb(sync)]
 pub fn delete_profile(id: String) -> Result<(), String> {
     core::delete_profile(&id)
 }
 
-#[flutter_rust_bridge::frb(sync)]
 pub fn start_profile(id: String) -> Result<StartOutcome, String> {
     core::start_profile(&id)
 }
 
-#[flutter_rust_bridge::frb(sync)]
 pub fn stop_profile(id: String) -> Result<(), String> {
     core::stop_profile(&id)
 }
 
-#[flutter_rust_bridge::frb(sync)]
 pub fn confirm_host_key(id: String, fingerprint: String, accepted: bool) -> Result<(), String> {
     core::confirm_host_key(&id, &fingerprint, accepted)
 }
 
-#[flutter_rust_bridge::frb(sync)]
-pub fn events(sink: StreamSink<ProxyEvent>) {
-    core::events(sink);
+pub fn subscribe_events() -> tokio::sync::broadcast::Receiver<ProxyEvent> {
+    core::subscribe_events()
 }

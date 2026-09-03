@@ -1,66 +1,92 @@
 # LocalProxy
 
-LocalProxy 是一个只面向 macOS 的本地代理桌面应用，使用 Flutter 提供界面，Rust 负责网络服务和生命周期管理。
+LocalProxy 是一个只面向 macOS 的本地代理桌面应用，使用 Electron + React/TypeScript 提供界面，Rust + Tokio 负责网络转发和生命周期管理。Electron 主进程通过 stdin/stdout NDJSON 私有通道驱动 Rust Core；应用不会开放外部控制 API。
 
 首期支持：
 
-- 固定上游的 HTTP/HTTPS 反向代理：请求路径和 query 追加到上游基础 URL。
-- HTTP/1.1 流式请求/响应转发，配置 headers/cookies 覆盖客户端同名值。
-- SSH 密码或私钥文件认证。
-- SSH 本地端口转发（`direct-tcpip`）。
-- 应用级 HTTP/SOCKS5 出站代理；HTTP profile 和 SSH profile 分别选择是否启用。
-- SSH 主机密钥首次确认、指纹校验、15 秒 keepalive 和指数退避自动重连。
+- 固定上游的 HTTP/HTTPS 反向代理，支持 HTTP/1.1 流式请求/响应转发。
+- Headers/Cookies 配置按名称覆盖客户端同名值，敏感值只写入 macOS Keychain。
+- SSH 密码或私钥文件认证、`direct-tcpip` 本地端口转发。
+- 应用级 HTTP/SOCKS5 出站代理；每个 HTTP/SSH profile 可单独选择是否经过它。
+- SSH 主机密钥首次确认、指纹校验、keepalive 和指数退避自动重连。
 - HTTP 和 SSH 转发端口均支持固定端口或系统随机端口。
-- 每个代理配置支持多个地址标签；SSH 的每条本地端口转发还支持独立 Tag，运行后界面显示可直接使用的完整本地地址。
+- profile 和每条 SSH 转发规则支持 Tag，运行后界面显示并支持复制完整本地地址。
 
-所有服务只监听 `127.0.0.1`，没有 CLI 或控制 API。应用重启后会恢复配置，但不会自动连接。
+所有服务只监听 `127.0.0.1`。应用重启后会恢复配置，但不会自动连接。
+
+## 工程结构
+
+```text
+.
+├── electron/                 # Electron 主进程、preload 与 Rust sidecar 管理
+├── src/                      # React/TypeScript UI
+├── rust/src/api/             # Electron 可调用的类型化业务 API
+├── rust/src/core/            # HTTP、SSH、Keychain、持久化与重连实现
+└── assets/brand/             # LocalProxy 图标源文件
+```
 
 ## 开发环境
 
 - macOS
-- Flutter 3.41 或更新版本
-- Rust 1.94.0
+- Node.js 18 或更新版本
+- Rust 1.94 或更新版本
 - Xcode command line tools
 
-首次准备依赖并生成桥接代码：
+安装前端依赖并构建 Rust Core：
 
 ```bash
-flutter pub get
-flutter_rust_bridge_codegen generate
+npm install
+npm run build:rust
 ```
 
-`rust/rust-toolchain.toml` 声明了 `aarch64-apple-darwin` 和 `x86_64-apple-darwin`，因此 native-assets 可以在 Apple Silicon 和 Intel macOS 上构建。
+启动桌面开发环境：
+
+```bash
+npm run dev:desktop
+```
+
+也可以分别启动 Vite 和 Electron：
+
+```bash
+npm run dev
+npm run dev:electron
+```
 
 ## 使用方式
 
-启动开发应用：
+打开“应用设置”，可以分别填写已有的 HTTP 代理和 SOCKS5 代理地址。它们是 LocalProxy 访问外部服务时使用的出站代理，不会在 LocalProxy 内部额外开启一个 SOCKS5 出口。
 
-```bash
-flutter run -d macos
-```
+创建 HTTP profile 时填写上游基础 URL 和本地端口；端口填写 `0` 会由系统随机分配。Headers/Cookies 支持逐项添加，也支持批量粘贴浏览器复制的“名称、下一行值”格式或每行一个 `名称: 值` 的格式。
 
-在界面中先打开右上角“应用设置”，分别填写 HTTP 代理和 SOCKS5 代理的主机、端口。然后创建 profile，填写可选的地址标签，按 profile 类型勾选对应的“使用应用级代理”，保存后点击启动。端点卡片会显示实际的完整本地地址并支持复制。SSH profile 可以配置多条本地端口转发。
-
-让 LocalProxy 建立 SSH 连接时经过已有的 SOCKS5：
-
-1. 先启动一个无认证 SOCKS5 服务，例如监听 `127.0.0.1:8099`。
-2. 在“应用设置 → SOCKS5 代理”中填写 `127.0.0.1:8099` 并启用。
-3. 编辑 SSH profile，勾选“使用应用级 SOCKS5 代理连接 SSH”，保存并启动。
-4. LocalProxy 会先连接配置的 SOCKS5，再通过 SOCKS5 CONNECT 到 SSH 主机，在这条连接上建立 SSH 会话；实际链路为：`客户端 → LocalProxy → 127.0.0.1:8099 → SSH 会话 → 目标地址`。
-
-HTTP profile 勾选“使用应用级 HTTP 代理”后，HTTP 上游请求会通过应用设置中的 HTTP 代理发送；HTTP 明文请求使用代理绝对 URI，HTTPS 上游先建立 CONNECT 隧道。代理认证暂不支持。
-
-Headers 表格支持“批量粘贴”：可以粘贴浏览器复制的“header 名称、下一行值”格式，也可以粘贴每行一个 `名称: 值` 的格式。
-
-本地端口转发支持 IPv4、IPv6 和域名。例如配置 `3307 → db-readonly.example.com:3306` 并启动后，使用 TCP 连接 `127.0.0.1:3307` 即可：
+创建 SSH profile 时可以添加多条本地转发规则，例如 `3307 → db-readonly.example.com:3306`。远端主机支持域名、IPv4 和 IPv6，域名会作为 SSH `direct-tcpip` 的目标交给 SSH 服务器解析：
 
 ```bash
 mysql --protocol=TCP -h 127.0.0.1 -P 3307 -u <mysql-user> -p
 ```
 
-域名会作为 SSH `direct-tcpip` 的目标原样发送，由 SSH 服务器所在环境解析；LocalProxy 本机不需要能解析这个内网域名。因此 Redis 的 IP 转发正常而 MySQL 域名转发失败时，请在 SSH 服务器上检查 `getent hosts <域名>` 和 `nc -vz <域名> 3306`，并确认目标网络允许 SSH 服务器访问。MySQL 与 Redis 在本地转发层都是 TCP，不需要分别实现协议支持。每条规则的 Tag 用于在多个转发地址中快速识别用途。
+如果 SSH profile 勾选“经过应用级 SOCKS5”，连接路径是：
 
-macOS 产物名称为 `LocalProxy.app`，应用图标使用 `macos/Runner/Assets.xcassets/AppIcon.appiconset` 中的 LocalProxy 网络节点图标。
+```text
+客户端 → LocalProxy → 配置的 SOCKS5 → SSH 会话 → 目标地址
+```
+
+界面中的“复制 SSH 命令”会在启用该选项时生成兼容 OpenSSH `connect` 的命令片段：
+
+```text
+ssh -o 'ProxyCommand=connect -S 127.0.0.1:<socks-port> %h %p' ...
+```
+
+`connect` 命令由用户环境提供，LocalProxy 只负责在内部建立 SSH 会话和本地端口转发。
+
+## 构建和打包
+
+构建 macOS arm64 DMG：
+
+```bash
+npm run build:mac
+```
+
+产物位于 `release/`，包含 `LocalProxy.app` 和 DMG。Rust sidecar 会被放入应用的 `Resources/bin/local_proxy_core`。发布版本仍需配置 Apple Developer ID 签名和 notarization。
 
 ## 配置和安全
 
@@ -70,20 +96,16 @@ macOS 产物名称为 `LocalProxy.app`，应用图标使用 `macos/Runner/Assets
 ~/Library/Application Support/LocalProxy/profiles.json
 ```
 
-文件带有 `schemaVersion`，通过临时文件同步后原子替换。密码、私钥口令以及 HTTP header/cookie 值只写入 macOS Keychain；配置文件和 UI 只显示“已配置”状态，不回显值。私钥本身不会复制到应用目录，只保存用户选择的路径。
+文件带有 `schemaVersion`，通过临时文件同步后原子替换。密码、私钥口令以及 HTTP header/cookie 值只写入 macOS Keychain；配置文件、UI 和脱敏日志不回显这些值。私钥本身不会复制到应用目录，只保存用户选择的路径。
 
 HTTP 不支持 CONNECT、HTTP/2、HTTP/3、WebSocket 或 `Location` 重写；SSH 不支持远程端口转发、终端会话和 ssh-agent。上游 TLS 默认严格校验证书。
 
 ## 验证
 
 ```bash
-cd rust
-cargo test
-cargo clippy -- -D warnings
-cd ..
-flutter analyze
-flutter test
-flutter build macos
+npm run lint
+npm run build:electron
+npm run build:rust
+cargo test --manifest-path rust/Cargo.toml
+cargo clippy --manifest-path rust/Cargo.toml -- -D warnings
 ```
-
-发布前还需要对 `.app` 做代码签名和 notarization。首期 macOS target 使用非 App Sandbox，以便读取用户选择的私钥文件。
