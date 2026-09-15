@@ -50,6 +50,14 @@
       {
         "from": "rust/target/release/local_proxy_core",
         "to": "bin/local_proxy_core"
+      },
+      {
+        "from": "rust/target/release/local_proxy_wireguard_helper",
+        "to": "bin/local_proxy_wireguard_helper"
+      },
+      {
+        "from": "assets/brand/localproxy-icon.png",
+        "to": "appicon/localproxy.png"
       }
     ],
     "mac": {

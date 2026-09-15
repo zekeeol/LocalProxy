@@ -1,9 +1,16 @@
-import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, nativeImage } from 'electron';
 import { join } from 'node:path';
 import { RustCoreManager } from './rust-core';
 
 let mainWindow: BrowserWindow | null = null;
 const rustCore = new RustCoreManager();
+
+function appIconPath(): string {
+  if (app.isPackaged) {
+    return join(process.resourcesPath, 'appicon', 'localproxy.png');
+  }
+  return join(__dirname, '..', 'assets', 'brand', 'localproxy-icon.png');
+}
 
 function registerIpcHandlers(): void {
   ipcMain.on('window:minimize', () => mainWindow?.minimize());
@@ -57,6 +64,7 @@ async function createWindow(): Promise<void> {
     minHeight: 700,
     title: 'LocalProxy',
     backgroundColor: '#edf4f6',
+    icon: nativeImage.createFromPath(appIconPath()),
     titleBarStyle: process.platform === 'darwin' ? 'hidden' : 'default',
     frame: process.platform === 'darwin' ? false : true,
     webPreferences: {
@@ -80,6 +88,10 @@ async function createWindow(): Promise<void> {
 }
 
 app.whenReady().then(async () => {
+  const appIcon = nativeImage.createFromPath(appIconPath());
+  if (!appIcon.isEmpty() && process.platform === 'darwin' && app.dock) {
+    app.dock.setIcon(appIcon);
+  }
   registerIpcHandlers();
   forwardRustEvents();
   try {
