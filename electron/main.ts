@@ -41,6 +41,11 @@ function forwardRustEvents(): void {
         payload: { message: error.message },
       });
     }
+    setTimeout(() => {
+      rustCore.start().catch((restartError) => {
+        console.error(`[LocalProxy] Rust Core 重启失败: ${String(restartError)}`);
+      });
+    }, 1_000);
   });
 }
 
@@ -81,6 +86,9 @@ app.whenReady().then(async () => {
     await rustCore.start();
   } catch (error) {
     console.error(`[LocalProxy] Rust Core 启动失败: ${String(error)}`);
+    setTimeout(() => {
+      void rustCore.start();
+    }, 1_000);
   }
   await createWindow();
   app.on('activate', () => {

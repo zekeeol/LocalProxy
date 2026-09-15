@@ -16,14 +16,47 @@ export type RustEvent = {
   payload: unknown;
 };
 
+function attemptDelay(attempt: number): number {
+  return Math.min(attempt, 3);
+}
+
 export class RustCoreManager extends EventEmitter {
   private child: ChildProcessWithoutNullStreams | null = null;
   private readonly pending = new Map<string, PendingRequest>();
   private sequence = 0;
   private ready = false;
+  private startPromise: Promise<void> | null = null;
 
   async start(): Promise<void> {
     if (this.child && this.ready) return;
+    if (!this.startPromise) {
+      this.startPromise = this.startWithRetry().finally(() => {
+        this.startPromise = null;
+      });
+    }
+    await this.startPromise;
+  }
+
+  private async startWithRetry(): Promise<void> {
+    let attempt = 0;
+
+    while (attempt < 3) {
+      attempt += 1;
+      try {
+        await this.startOnce();
+        return;
+      } catch (error) {
+        await this.stop(true);
+        if (attempt === 3) {
+          throw error;
+        }
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 220 * attemptDelay(attempt)));
+      }
+    }
+  }
+
+  private async startOnce(): Promise<void> {
+    await this.stop(true);
 
     const binary = this.findBinary();
     if (!binary) {
@@ -73,6 +106,9 @@ export class RustCoreManager extends EventEmitter {
 
   async sendRequest<T>(method: string, params: unknown = {}): Promise<T> {
     if (!this.child || !this.ready || !this.child.stdin.writable) {
+      await this.start();
+    }
+    if (!this.child || !this.ready || !this.child.stdin.writable) {
       throw new Error('Rust Core 尚未就绪');
     }
 
@@ -98,11 +134,11 @@ export class RustCoreManager extends EventEmitter {
     });
   }
 
-  async stop(): Promise<void> {
+  async stop(skipShutdown = false): Promise<void> {
     const child = this.child;
     if (!child) return;
 
-    if (this.ready && child.stdin.writable) {
+    if (!skipShutdown && this.ready && child.stdin.writable) {
       try {
         await this.sendRequest('shutdown');
       } catch {
