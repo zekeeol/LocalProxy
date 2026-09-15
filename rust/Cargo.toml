@@ -15,6 +15,9 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]
 bytes = "1"
+base64 = "0.22"
+boringtun = { version = "0.7.1", features = ["device"] }
+ctrlc = "3"
 dirs = "6"
 futures-util = "0.3"
 http-body-util = "0.1"
@@ -24,11 +27,15 @@ hyper = { version = "1.11", features = ["client", "http1", "server"] }
 hyper-rustls = "0.27"
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "server", "tokio"] }
 keyring = "4.2"
+libc = "0.2"
 russh = { version = "0.63", default-features = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time", "io-util", "io-std"] }
+tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-thread", "sync", "time", "io-util", "io-std"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tower-service = "0.3"
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
+
+# Upstream library is not published on crates.io; pin the reviewed source.
+wstunnel = { git = "https://github.com/erebe/wstunnel.git", rev = "6c1acdfa11197d2152d530f4e0003367a55b2ae6" }

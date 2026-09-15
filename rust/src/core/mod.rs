@@ -1,5 +1,7 @@
 mod http_proxy;
 mod ssh_proxy;
+pub(crate) mod wireguard;
+pub(crate) mod wstunnel;
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -16,13 +18,14 @@ use crate::api::local_proxy::{
     AppSettingsDraft, AppSettingsView, Endpoint, EventKind, ForwardView, HttpDraft, HttpView,
     ProfileDraft, ProfileSummary, ProfileView, ProxyEndpoint, ProxyEvent, ProxyType,
     SecretFieldView, SecretPatch, SecretPatchKind, ServiceState, SshAuthMode, SshDraft, SshView,
-    StartOutcome,
+    StartOutcome, WireGuardConfig, WireGuardView, WstunnelConfig,
 };
 
 const SCHEMA_VERSION: u32 = 1;
 const SERVICE_NAME: &str = "com.localproxy.LocalProxy";
 const CONFIG_DIRECTORY: &str = "LocalProxy";
 const CONFIG_FILE: &str = "profiles.json";
+const WIREGUARD_SECRET_FILE: &str = "wireguard-private-keys.json";
 
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 static CONTROLLER: OnceLock<Arc<AppController>> = OnceLock::new();
@@ -40,7 +43,7 @@ pub(crate) struct AppController {
 
 #[derive(Debug)]
 struct ActiveService {
-    stop: oneshot::Sender<()>,
+    stop: Option<oneshot::Sender<()>>,
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +103,10 @@ struct StoredProfile {
     kind: ProxyType,
     http: Option<StoredHttpProfile>,
     ssh: Option<StoredSshProfile>,
+    #[serde(default)]
+    wstunnel: Option<WstunnelConfig>,
+    #[serde(default)]
+    wireguard: Option<WireGuardConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,7 +150,9 @@ struct StoredForward {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct SecretStore;
+pub(crate) struct SecretStore {
+    data_dir: PathBuf,
+}
 
 impl SecretStore {
     fn username(profile_id: &str, category: &str, name: &str) -> String {
@@ -156,19 +165,94 @@ impl SecretStore {
             .map_err(|error| format!("Keychain 初始化失败: {error:?}"))
     }
 
+    fn is_wireguard_private_key(category: &str, name: &str) -> bool {
+        category == "wireguard" && name == "private-key"
+    }
+
+    fn wireguard_key_path(&self) -> PathBuf {
+        self.data_dir.join(WIREGUARD_SECRET_FILE)
+    }
+
+    fn read_wireguard_keys(&self) -> Result<HashMap<String, String>, String> {
+        let path = self.wireguard_key_path();
+        if !path.exists() {
+            return Ok(HashMap::new());
+        }
+        let bytes =
+            fs::read(&path).map_err(|error| format!("读取 WireGuard 密钥文件失败: {error}"))?;
+        serde_json::from_slice(&bytes)
+            .map_err(|error| format!("解析 WireGuard 密钥文件失败: {error}"))
+    }
+
+    fn write_wireguard_keys(&self, keys: &HashMap<String, String>) -> Result<(), String> {
+        let path = self.wireguard_key_path();
+        let bytes = serde_json::to_vec_pretty(keys)
+            .map_err(|error| format!("序列化 WireGuard 密钥文件失败: {error}"))?;
+        let temporary = path.with_extension("json.tmp");
+        fs::write(&temporary, bytes)
+            .map_err(|error| format!("写入 WireGuard 密钥文件失败: {error}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))
+                .map_err(|error| format!("设置 WireGuard 密钥文件权限失败: {error}"))?;
+        }
+        fs::rename(&temporary, &path)
+            .map_err(|error| format!("保存 WireGuard 密钥文件失败: {error}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+                .map_err(|error| format!("设置 WireGuard 密钥文件权限失败: {error}"))?;
+        }
+        Ok(())
+    }
+
+    fn set_wireguard_private_key(&self, profile_id: &str, value: &str) -> Result<(), String> {
+        let mut keys = self.read_wireguard_keys()?;
+        keys.insert(profile_id.to_owned(), value.to_owned());
+        self.write_wireguard_keys(&keys)?;
+        Ok(())
+    }
+
+    fn get_wireguard_private_key(&self, profile_id: &str) -> Result<String, String> {
+        let keys = self.read_wireguard_keys()?;
+        keys.get(profile_id)
+            .cloned()
+            .ok_or_else(|| "WireGuard PrivateKey 未配置".to_string())
+    }
+
     fn set(&self, profile_id: &str, category: &str, name: &str, value: &str) -> Result<(), String> {
+        if Self::is_wireguard_private_key(category, name) {
+            return self.set_wireguard_private_key(profile_id, value);
+        }
         Self::entry(profile_id, category, name)?
             .set_password(value)
             .map_err(|error| format!("Keychain 写入失败: {error:?}"))
     }
 
     fn get(&self, profile_id: &str, category: &str, name: &str) -> Result<String, String> {
+        if Self::is_wireguard_private_key(category, name) {
+            return self.get_wireguard_private_key(profile_id);
+        }
         Self::entry(profile_id, category, name)?
             .get_password()
             .map_err(|error| format!("读取 Keychain 密钥失败: {error:?}"))
     }
 
     fn delete(&self, profile_id: &str, category: &str, name: &str) {
+        if Self::is_wireguard_private_key(category, name) {
+            if let Ok(mut keys) = self.read_wireguard_keys() {
+                if keys.remove(profile_id).is_some() {
+                    if keys.is_empty() {
+                        let _ = fs::remove_file(self.wireguard_key_path());
+                    } else {
+                        let _ = self.write_wireguard_keys(&keys);
+                    }
+                }
+            }
+            return;
+        }
         if let Ok(entry) = Self::entry(profile_id, category, name) {
             let _ = entry.delete_credential();
         }
@@ -186,6 +270,9 @@ impl SecretStore {
         if profile.ssh.is_some() {
             self.delete(&profile.id, "ssh", "password");
             self.delete(&profile.id, "ssh", "passphrase");
+        }
+        if profile.wireguard.is_some() {
+            self.delete(&profile.id, "wireguard", "private-key");
         }
     }
 }
@@ -208,9 +295,11 @@ pub(crate) fn init() {
     let store = load_store(&data_dir).unwrap_or_default();
     let (events, _) = broadcast::channel(256);
     let controller = Arc::new(AppController {
-        data_dir,
+        data_dir: data_dir.clone(),
         store: Mutex::new(store),
-        secrets: SecretStore,
+        secrets: SecretStore {
+            data_dir: data_dir.clone(),
+        },
         active: Mutex::new(HashMap::new()),
         statuses: Mutex::new(HashMap::new()),
         pending_host_keys: Mutex::new(HashMap::new()),
@@ -688,7 +777,12 @@ pub(crate) fn start_profile(id: &str) -> Result<StartOutcome, String> {
         .active
         .lock()
         .map_err(|_| "运行状态锁已损坏".to_string())?
-        .insert(id.to_string(), ActiveService { stop: stop_tx });
+        .insert(
+            id.to_string(),
+            ActiveService {
+                stop: Some(stop_tx),
+            },
+        );
     set_status(
         &controller,
         id,
@@ -704,6 +798,32 @@ pub(crate) fn start_profile(id: &str) -> Result<StartOutcome, String> {
 
     let weak = Arc::downgrade(&controller);
     match &profile.kind {
+        ProxyType::WireGuard => {
+            let config = profile.wireguard.clone().ok_or("WireGuard 配置不完整")?;
+            let private_key = controller.secrets.get(id, "wireguard", "private-key")?;
+            runtime().spawn(async move {
+                let result = wireguard::run(
+                    weak.clone(),
+                    profile.id.clone(),
+                    config,
+                    private_key,
+                    stop_rx,
+                )
+                .await;
+                if let Some(controller) = weak.upgrade() {
+                    service_finished(&controller, &profile.id, result);
+                }
+            });
+        }
+        ProxyType::Wstunnel => {
+            let config = profile.wstunnel.clone().ok_or("Wstunnel 配置不完整")?;
+            runtime().spawn(async move {
+                let result = wstunnel::run(weak.clone(), profile.id.clone(), config, stop_rx).await;
+                if let Some(controller) = weak.upgrade() {
+                    service_finished(&controller, &profile.id, result);
+                }
+            });
+        }
         ProxyType::Http => {
             let Some(http) = profile.http else {
                 remove_active(&controller, id);
@@ -740,6 +860,9 @@ fn validate_profile_proxy(
     settings: &StoredAppSettings,
 ) -> Result<(), String> {
     match &profile.kind {
+        ProxyType::Wstunnel => {
+            wstunnel::validate(profile.wstunnel.as_ref().ok_or("Wstunnel 配置不完整")?)?;
+        }
         ProxyType::Http => {
             if profile
                 .http
@@ -761,19 +884,50 @@ fn validate_profile_proxy(
                 );
             }
         }
+        ProxyType::WireGuard => {}
     }
     Ok(())
 }
 
 pub(crate) fn stop_profile(id: &str) -> Result<(), String> {
     let controller = controller();
+    // Keep the service registered until its tasks have exited and released its ports.
+    if find_profile_optional(&controller, id).is_some_and(|p| p.kind == ProxyType::Wstunnel) {
+        if let Some(active) = controller
+            .active
+            .lock()
+            .map_err(|_| "运行状态锁已损坏")?
+            .get_mut(id)
+        {
+            if let Some(stop) = active.stop.take() {
+                let _ = stop.send(());
+            }
+        }
+        return Ok(());
+    }
+    if find_profile_optional(&controller, id).is_some_and(|p| p.kind == ProxyType::WireGuard) {
+        if let Some(active) = controller
+            .active
+            .lock()
+            .map_err(|_| "运行状态锁已损坏")?
+            .get_mut(id)
+        {
+            if let Some(stop) = active.stop.take() {
+                let _ = stop.send(());
+            }
+        }
+        return Ok(());
+    }
+
     let active = controller
         .active
         .lock()
         .map_err(|_| "运行状态锁已损坏".to_string())?
         .remove(id);
     if let Some(active) = active {
-        let _ = active.stop.send(());
+        if let Some(stop) = active.stop {
+            let _ = stop.send(());
+        }
         let pending = controller
             .pending_host_keys
             .lock()
@@ -837,6 +991,12 @@ pub(crate) fn subscribe_events() -> broadcast::Receiver<ProxyEvent> {
     controller().events.subscribe()
 }
 
+pub(crate) async fn wireguard_status(
+    id: &str,
+) -> Result<Option<crate::api::local_proxy::WireGuardStatus>, String> {
+    wireguard::status(id).await
+}
+
 pub(crate) fn upgrade(weak: &Weak<AppController>) -> Result<Arc<AppController>, String> {
     weak.upgrade()
         .ok_or_else(|| "LocalProxy 已关闭".to_string())
@@ -889,6 +1049,23 @@ fn summary_for(controller: &AppController, profile: &StoredProfile) -> ProfileSu
 }
 
 fn configured_endpoints(profile: &StoredProfile) -> Vec<Endpoint> {
+    if let Some(config) = &profile.wstunnel {
+        return wstunnel::endpoints(config);
+    }
+    if let Some(config) = &profile.wireguard {
+        let peers = config
+            .peers
+            .iter()
+            .map(|peer| format!("{}:{}", peer.endpoint_host, peer.endpoint_port))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return vec![Endpoint {
+            kind: "wireguard".to_string(),
+            host: "utun".to_string(),
+            port: 0,
+            description: format!("{} → {}", config.addresses.join(", "), peers),
+        }];
+    }
     match (&profile.http, &profile.ssh) {
         (Some(http), _) => vec![http_endpoint(http.listen_port)],
         (_, Some(ssh)) => [
@@ -940,6 +1117,18 @@ fn view_for(controller: &AppController, profile: &StoredProfile) -> ProfileView 
                 .collect(),
             use_system_proxy: http.use_system_proxy,
         }),
+        wstunnel: profile.wstunnel.clone(),
+        wireguard: profile.wireguard.as_ref().map(|config| WireGuardView {
+            addresses: config.addresses.clone(),
+            dns: config.dns.clone(),
+            mtu: config.mtu,
+            listen_port: config.listen_port,
+            private_key_configured: matches!(
+                config.private_key.kind,
+                SecretPatchKind::Keep | SecretPatchKind::Set
+            ),
+            peers: config.peers.clone(),
+        }),
         ssh: profile.ssh.as_ref().map(|ssh| SshView {
             host: ssh.host.clone(),
             port: ssh.port,
@@ -978,6 +1167,41 @@ fn build_stored_profile(
     }
     let tags = normalize_tags(&draft.tags)?;
     match draft.kind {
+        ProxyType::Wstunnel => {
+            let config = draft.wstunnel.ok_or("Wstunnel 配置不完整")?;
+            wstunnel::validate(&config)?;
+            Ok(StoredProfile {
+                id: id.to_string(),
+                name: name.to_string(),
+                tags,
+                kind: ProxyType::Wstunnel,
+                http: None,
+                ssh: None,
+                wstunnel: Some(config),
+                wireguard: None,
+            })
+        }
+        ProxyType::WireGuard => {
+            let config = draft
+                .wireguard
+                .ok_or_else(|| "WireGuard 配置不完整".to_string())?;
+            let stored_config = build_wireguard(
+                controller,
+                id,
+                config,
+                previous.and_then(|profile| profile.wireguard.as_ref()),
+            )?;
+            Ok(StoredProfile {
+                id: id.to_string(),
+                name: name.to_string(),
+                tags,
+                kind: ProxyType::WireGuard,
+                http: None,
+                ssh: None,
+                wstunnel: None,
+                wireguard: Some(stored_config),
+            })
+        }
         ProxyType::Http => {
             let http = draft.http.ok_or_else(|| "HTTP 配置不完整".to_string())?;
             let old_http = previous.and_then(|profile| profile.http.as_ref());
@@ -986,9 +1210,11 @@ fn build_stored_profile(
                 id: id.to_string(),
                 name: name.to_string(),
                 tags,
+                wstunnel: None,
                 kind: ProxyType::Http,
                 http: Some(stored_http),
                 ssh: None,
+                wireguard: None,
             })
         }
         ProxyType::Ssh => {
@@ -999,12 +1225,57 @@ fn build_stored_profile(
                 id: id.to_string(),
                 name: name.to_string(),
                 tags,
+                wstunnel: None,
                 kind: ProxyType::Ssh,
                 http: None,
                 ssh: Some(stored_ssh),
+                wireguard: None,
             })
         }
     }
+}
+
+fn build_wireguard(
+    controller: &AppController,
+    id: &str,
+    draft: WireGuardConfig,
+    old: Option<&WireGuardConfig>,
+) -> Result<WireGuardConfig, String> {
+    let old_configured = previous_wireguard_key_configured(old);
+    let configured = apply_fixed_secret(
+        controller,
+        id,
+        "wireguard",
+        "private-key",
+        &draft.private_key,
+        old_configured,
+    )?;
+    if !configured {
+        return Err("WireGuard PrivateKey 未配置".to_string());
+    }
+    let stored = WireGuardConfig {
+        addresses: draft.addresses,
+        dns: draft.dns,
+        mtu: draft.mtu,
+        listen_port: draft.listen_port,
+        private_key: SecretPatch {
+            name: "private_key".into(),
+            value: None,
+            kind: SecretPatchKind::Keep,
+        },
+        peers: draft.peers,
+    };
+    wireguard::validate(&stored)?;
+    Ok(stored)
+}
+
+fn previous_wireguard_key_configured(config: Option<&WireGuardConfig>) -> bool {
+    config.is_some_and(|config| {
+        matches!(
+            config.private_key.kind,
+            SecretPatchKind::Keep | SecretPatchKind::Set
+        )
+    })
 }
 
 fn normalize_tags(raw_tags: &[String]) -> Result<Vec<String>, String> {

@@ -39,7 +39,11 @@ import {
   Wifi,
   X,
 } from 'lucide-react';
+import logoMark from '../assets/brand/localproxy-logo.svg';
 import type {
+  WstunnelConfig,
+  WireGuardStatus,
+  WireGuardConfig,
   AppSettings,
   AuthMode,
   Endpoint,
@@ -78,6 +82,12 @@ function formatAddress(host: string, port: number): string {
   return port > 0 ? `${formattedHost}:${port}` : `${formattedHost}:随机端口`;
 }
 
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
 function stateClass(state: ServiceState): string {
   switch (state) {
     case 'Running':
@@ -113,7 +123,12 @@ function stateLabel(state: ServiceState): string {
 }
 
 function kindLabel(kind: ProxyKind): string {
-  return kind === 'Http' ? 'HTTP 反向代理' : 'SSH 端口转发';
+  switch (kind) {
+    case 'Http': return 'HTTP 反向代理';
+    case 'Wstunnel': return 'Wstunnel 隧道';
+    case 'WireGuard': return 'WireGuard 隧道';
+    default: return 'SSH 端口转发';
+  }
 }
 
 function isActive(state: ServiceState): boolean {
@@ -122,6 +137,15 @@ function isActive(state: ServiceState): boolean {
 
 function endpointForProfile(profile: ProfileView): Endpoint[] {
   if (profile.endpoints.length > 0) return profile.endpoints;
+  if (profile.wstunnel) return profile.wstunnel.forwards.map(f => ({kind: f.protocol, host: '127.0.0.1', port: f.local_port, description: `${f.protocol.toUpperCase()} → ${formatAddress(f.remote_host, f.remote_port)}`}));
+  if (profile.wireguard) {
+    return [{
+      kind: 'wireguard',
+      host: 'utun',
+      port: 0,
+      description: profile.wireguard.peers.map((peer) => `${peer.endpoint_host}:${peer.endpoint_port}`).join(', '),
+    }];
+  }
   if (profile.http) {
     return [
       {
@@ -238,13 +262,7 @@ function buildSecretPatches(
 function AppLogo({ large = false }: { large?: boolean }) {
   return (
     <span className={`logo-mark${large ? ' large' : ''}`} aria-hidden="true">
-      <svg viewBox="0 0 100 100" fill="none">
-        <circle cx="50" cy="50" r="16" stroke="white" strokeWidth="10" />
-        <path d="M48 20A30 30 0 0 1 78 50" stroke="white" strokeWidth="10" strokeLinecap="round" />
-        <path d="M52 80A30 30 0 0 1 22 50" stroke="white" strokeWidth="10" strokeLinecap="round" />
-        <circle cx="74" cy="50" r="3.5" fill="#0891b2" />
-        <circle cx="26" cy="50" r="3.5" fill="#0891b2" />
-      </svg>
+      <img src={logoMark} alt="" />
     </span>
   );
 }
@@ -261,6 +279,8 @@ export default function App() {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [engineReady, setEngineReady] = useState(Boolean(bridge()));
+  const [typePickerOpen, setTypePickerOpen] = useState(false);
+  const [editorKind, setEditorKind] = useState<ProxyKind>('Http');
 
   const notify = useCallback((message: string, tone: Toast['tone'] = 'info') => {
     const id = Date.now() + Math.floor(Math.random() * 1000);
@@ -341,13 +361,13 @@ export default function App() {
     }
     if (proxyEvent.kind === 'Log' || proxyEvent.message) {
       setLogs((current) => [
-        ...current.slice(-99),
         {
           id: `${Date.now()}-${Math.random()}`,
           time: nowTime(),
           state: proxyEvent.state,
           message: proxyEvent.message || '',
         },
+        ...current.slice(0, 99),
       ]);
     }
   }, [notify]);
@@ -441,7 +461,7 @@ export default function App() {
           profiles={profiles}
           selectedId={selectedId}
           onSelect={handleSelect}
-          onCreate={() => setEditor(null)}
+          onCreate={() => setTypePickerOpen(true)}
         />
         <main className="content">
           <div className="content-inner">
@@ -461,7 +481,7 @@ export default function App() {
                 onClearLogs={() => setLogs([])}
               />
             ) : (
-              <EmptyState onCreate={() => setEditor(null)} engineReady={engineReady} />
+              <EmptyState onCreate={() => setTypePickerOpen(true)} engineReady={engineReady} />
             )}
           </div>
         </main>
@@ -470,10 +490,21 @@ export default function App() {
         <ProfileEditor
           key={editor?.id ?? 'new'}
           initial={editor}
+          initialKind={editor?.kind ?? editorKind}
           settings={settings}
           onClose={() => setEditor(undefined)}
           onSave={handleSave}
           onNotify={notify}
+        />
+      )}
+      {typePickerOpen && (
+        <TypePickerModal
+          onClose={() => setTypePickerOpen(false)}
+          onChoose={(kind) => {
+            setTypePickerOpen(false);
+            setEditorKind(kind);
+            setEditor(null);
+          }}
         />
       )}
       {settingsOpen && (
@@ -585,7 +616,7 @@ function Sidebar({
                 <div>
                   <div className="profile-title">{profile.name}</div>
                   <div className="profile-type">
-                    {profile.kind === 'Http' ? <Globe size={14} /> : <Terminal size={14} />}
+                    {profile.kind === 'Http' ? <Globe size={14} /> : profile.kind === 'WireGuard' ? <ShieldCheck size={14} /> : profile.kind === 'Wstunnel' ? <Link2 size={14} /> : <Terminal size={14} />}
                     {kindLabel(profile.kind)}
                   </div>
                 </div>
@@ -617,7 +648,7 @@ function EmptyState({ onCreate, engineReady }: { onCreate: () => void; engineRea
     <div className="empty-state">
       <AppLogo large />
       <h2>{engineReady ? '开始管理本地代理' : '等待 Rust Core 连接'}</h2>
-      <p>{engineReady ? '创建 HTTP 反向代理或 SSH 本地端口转发。所有服务只监听 127.0.0.1，实际端口会在启动后同步显示。' : '请从 Electron 桌面端启动，并确认 Rust Core 已完成编译。'}</p>
+      <p>{engineReady ? '创建 HTTP 反向代理、SSH 或 Wstunnel 本地端口转发。所有服务只监听 127.0.0.1，实际端口会在启动后同步显示。' : '请从 Electron 桌面端启动，并确认 Rust Core 已完成编译。'}</p>
       {engineReady && <div className="empty-actions"><button className="primary-button" onClick={onCreate}><Plus size={15} />新建代理配置</button></div>}
     </div>
   );
@@ -646,6 +677,7 @@ function DetailView({
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
+  const [wgStatus, setWgStatus] = useState<WireGuardStatus | null>(null);
   const endpoints = endpointForProfile(profile);
   const active = isActive(profile.state);
   const proxy = profile.kind === 'Http' ? settings.http_proxy : settings.socks_proxy;
@@ -660,11 +692,33 @@ function DetailView({
     ? buildSshCommand(profile.ssh, settings.socks_proxy)
     : '';
 
+  useEffect(() => {
+    if (profile.kind !== 'WireGuard' || !isActive(profile.state)) {
+      setWgStatus(null);
+      return;
+    }
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const status = await bridge()?.request<WireGuardStatus | null>('wireguard_status', { id: profile.id });
+        if (!cancelled && status) setWgStatus(status);
+      } catch {
+        if (!cancelled) setWgStatus(null);
+      }
+    };
+    void load();
+    const timer = window.setInterval(() => void load(), 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [profile.id, profile.kind, profile.state]);
+
   return (
     <>
       <section className="detail-header">
         <div className="selected-profile-title">
-          <span className="detail-icon">{profile.kind === 'Http' ? <Globe size={24} /> : <Terminal size={24} />}</span>
+          <span className="detail-icon">{profile.kind === 'Http' ? <Globe size={24} /> : profile.kind === 'WireGuard' ? <ShieldCheck size={24} /> : <Terminal size={24} />}</span>
           <div className="detail-heading-copy">
             <h1>{profile.name}</h1>
             <div className="detail-subtitle">
@@ -678,10 +732,10 @@ function DetailView({
           </div>
         </div>
         <div className="detail-actions">
-          <button className={active ? 'danger-button' : 'primary-button'} onClick={onToggle}>
+          <button className={active ? 'danger-button' : 'primary-button'} onClick={onToggle} disabled={!bridge()}>
             {active ? <><Square size={14} fill="currentColor" />停止</> : <><Play size={14} fill="currentColor" />启动</>}
           </button>
-          <button className="outline-button" onClick={onEdit}><Pencil size={14} />编辑</button>
+          <button className="outline-button" onClick={onEdit} disabled={!bridge()}><Pencil size={14} />编辑</button>
           <div style={{ position: 'relative' }}>
             <button className="icon-button" onClick={() => setMenuOpen((open) => !open)} title="更多操作"><MoreHorizontal size={19} /></button>
             {menuOpen && (
@@ -718,8 +772,22 @@ function DetailView({
             <div className="empty-sidebar"><strong>暂无端点</strong><span>添加 SSH 转发规则后启动即可使用</span></div>
           ) : endpoints.map((endpoint, index) => {
             const address = formatAddress(endpoint.host, endpoint.port);
-            const forward = profile.ssh?.forwards[index];
+            const wsForward = profile.wstunnel?.forwards[index];
+            const forward = profile.ssh?.forwards[index] ?? (wsForward ? { ...wsForward, tag: wsForward.protocol.toUpperCase() + ' 本地转发' } : undefined);
             const isCopied = copied === address;
+            if (profile.kind === 'WireGuard') {
+              const peer = profile.wireguard?.peers[index] ?? profile.wireguard?.peers[0];
+              return (
+                <div className="endpoint-card" key={`${endpoint.kind}-${index}-${endpoint.port}`}>
+                  <div className="endpoint-card-top">
+                    <div className="endpoint-kind"><span className="endpoint-kind-icon"><ShieldCheck size={15} /></span><div><strong>{endpoint.host}</strong><div className="endpoint-state">{stateLabel(profile.state)} · WireGuard 接口</div></div></div>
+                  </div>
+                  <div className="copyable-address"><span>{profile.wireguard?.addresses.join(', ') || '未配置地址'}</span></div>
+                  <div className="endpoint-remote">对端 · {peer ? `${peer.endpoint_host}:${peer.endpoint_port}` : '未配置'}</div>
+                  <div className="endpoint-meta"><span className="tag neutral">WireGuard</span>{peer?.persistent_keepalive != null && <span className="tag">Keepalive {peer.persistent_keepalive}s</span>}</div>
+                </div>
+              );
+            }
             return (
               <div className="endpoint-card" key={`${endpoint.kind}-${index}-${endpoint.port}`} onClick={() => void copyEndpoint(address)}>
                 <div className="endpoint-card-top">
@@ -728,7 +796,7 @@ function DetailView({
                 </div>
                 <div className="copyable-address"><span>{profile.kind === 'Http' ? `http://${address}` : address}</span></div>
                 <div className="endpoint-remote">{profile.kind === 'Http' ? `上游 · ${profile.http?.upstream_url ?? '未配置'}` : `远端目标 · ${formatAddress(forward?.remote_host ?? endpoint.host, forward?.remote_port ?? 0)}`}</div>
-                <div className="endpoint-meta"><span className="tag neutral">{endpoint.kind === 'http' ? 'HTTP/1.1' : 'direct-tcpip'}</span>{forward?.tag && <span className="tag">{forward.tag}</span>}</div>
+                <div className="endpoint-meta"><span className="tag neutral">{endpoint.kind === 'http' ? 'HTTP/1.1' : profile.wstunnel ? 'WebSocket' : 'direct-tcpip'}</span>{forward?.tag && <span className="tag">{forward.tag}</span>}</div>
               </div>
             );
           })}
@@ -744,19 +812,44 @@ function DetailView({
             <KeyValue label="鉴权 Headers" value={`${profile.http.headers.length} 项（值已隐藏）`} />
             <KeyValue label="鉴权 Cookies" value={`${profile.http.cookies.length} 项（值已隐藏）`} />
             <KeyValue label="应用 HTTP 代理" value={profile.http.use_system_proxy ? (proxy ? formatAddress(proxy.host, proxy.port) : '未配置') : '未启用'} mono />
+          </> : profile.kind === 'WireGuard' && profile.wireguard ? <>
+            <KeyValue label="接口地址" value={profile.wireguard.addresses.join(', ')} mono />
+            <KeyValue label="接口 MTU" value={profile.wireguard.mtu?.toString() ?? '系统默认'} mono />
+            <KeyValue label="监听端口" value={profile.wireguard.listen_port ? profile.wireguard.listen_port.toString() : '随机端口'} mono />
+            <KeyValue label="DNS" value={profile.wireguard.dns.join(', ') || '未修改'} mono />
+            <KeyValue label="对端数量" value={`${profile.wireguard.peers.length} 个`} />
           </> : profile.ssh ? <>
             <KeyValue label="SSH 远端" value={`${profile.ssh.username}@${formatAddress(profile.ssh.host, profile.ssh.port)}`} mono />
             <KeyValue label="认证方式" value={profile.ssh.auth_mode === 'Password' ? (profile.ssh.password_configured ? '密码（已保存）' : '密码未配置') : '私钥文件'} />
             <KeyValue label="本地转发" value={`${profile.ssh.forwards.length} 条规则`} />
             <KeyValue label="应用 SOCKS5 代理" value={profile.ssh.use_system_proxy ? (proxy ? formatAddress(proxy.host, proxy.port) : '未配置') : '未启用'} mono />
+          </> : profile.wstunnel ? <>
+            <KeyValue label="Wstunnel 服务端" value={profile.wstunnel.server_url} mono />
+            <KeyValue label="HTTP Upgrade 路径前缀" value={profile.wstunnel.http_upgrade_path_prefix} mono />
+            <KeyValue label="本地转发" value={`${profile.wstunnel.forwards.length} 条规则`} />
+            <KeyValue label="TLS 证书校验" value={profile.wstunnel.tls_verify_certificate ? '已启用' : '未启用（与原命令一致）'} />
           </> : null}
         </div>
+        {profile.kind === 'WireGuard' && (
+          <div className="wg-status-grid">
+            <KeyValue label="实际接口" value={wgStatus?.interface_name ?? '启动后显示'} mono />
+            <KeyValue label="本机公钥" value={wgStatus?.public_key ? `${wgStatus.public_key.slice(0, 12)}…` : '未连接'} mono />
+            {(wgStatus?.peers ?? []).map((peer) => (
+              <KeyValue
+                key={peer.public_key}
+                label={`对端 ${peer.public_key.slice(0, 8)}…`}
+                value={`${peer.endpoint ?? '未连接'} · 接收 ${formatBytes(peer.rx_bytes)} · 发送 ${formatBytes(peer.tx_bytes)} · 握手 ${peer.handshake_age_sec == null ? '未完成' : `${peer.handshake_age_sec} 秒前`}`}
+                mono
+              />
+            ))}
+          </div>
+        )}
       </section>
 
       <section className="surface-card log-card">
         <div className="section-title"><div className="section-title-left"><span className="section-icon"><List size={15} /></span><div><h2>运行日志</h2><p>来自 Rust Core 的脱敏状态事件</p></div></div><button className="small-button" onClick={onClearLogs}>清空</button></div>
         <div className="log-list">
-          {logs.length === 0 ? <div className="empty-sidebar"><span>暂无运行日志</span></div> : logs.slice(-30).map((log) => <div className="log-row" key={log.id}><span className="log-time">{log.time}</span><span className="log-level">{stateLabel(log.state)}</span><span className="log-message" title={log.message}>{log.message}</span></div>)}
+          {logs.length === 0 ? <div className="empty-sidebar"><span>暂无运行日志</span></div> : logs.slice(0, 30).map((log) => <div className="log-row" key={log.id}><span className="log-time">{log.time}</span><span className="log-level">{stateLabel(log.state)}</span><span className="log-message" title={log.message}>{log.message}</span></div>)}
         </div>
       </section>
       {summary?.error && !profile.error && <div className="field-hint">{summary.error}</div>}
@@ -790,14 +883,26 @@ function ToastStack({ toasts, onDismiss }: { toasts: Toast[]; onDismiss: (id: nu
   return <div className="toast-stack">{toasts.map((toast) => <div className={`toast ${toast.tone}`} key={toast.id}>{toast.tone === 'error' ? <AlertCircle size={16} /> : toast.tone === 'success' ? <CheckCircle2 size={16} /> : <Activity size={16} />}<span>{toast.message}</span><button onClick={() => onDismiss(toast.id)}><X size={14} /></button></div>)}</div>;
 }
 
+function TypePickerModal({ onClose, onChoose }: { onClose: () => void; onChoose: (kind: ProxyKind) => void }) {
+  const options: Array<{ kind: ProxyKind; title: string; hint: string; icon: JSX.Element }> = [
+    { kind: 'WireGuard', title: 'WireGuard 隧道', hint: 'wg-quick 导入 · utun · 路由和 DNS', icon: <ShieldCheck size={20} /> },
+    { kind: 'Wstunnel', title: 'Wstunnel 隧道', hint: 'UDP / TCP over WebSocket', icon: <Link2 size={20} /> },
+    { kind: 'Http', title: 'HTTP 反向代理', hint: '上游替换与 Header / Cookie 注入', icon: <Globe size={20} /> },
+    { kind: 'Ssh', title: 'SSH 端口转发', hint: '本地端口 → SSH 远端', icon: <Terminal size={20} /> },
+  ];
+  return <div className="modal-backdrop"><div className="dialog type-picker-dialog" role="dialog" aria-modal="true"><div className="modal-heading"><div><h2>选择代理类型</h2><p>不同类型的配置卡片相互独立</p></div><button className="icon-button" onClick={onClose}><X size={18} /></button></div><div className="dialog-scroll type-grid">{options.map((option) => <button key={option.kind} className="type-card" onClick={() => onChoose(option.kind)}>{option.icon}<strong>{option.title}</strong><span>{option.hint}</span></button>)}</div></div></div>;
+}
+
 function ProfileEditor({
   initial,
+  initialKind,
   settings,
   onClose,
   onSave,
   onNotify,
 }: {
   initial: ProfileView | null;
+  initialKind: ProxyKind;
   settings: AppSettings;
   onClose: () => void;
   onSave: (draft: ProfileDraft) => Promise<void>;
@@ -805,7 +910,56 @@ function ProfileEditor({
 }) {
   const initialHttp = initial?.http;
   const initialSsh = initial?.ssh;
-  const [kind, setKind] = useState<ProxyKind>(initial?.kind ?? 'Ssh');
+  const initialWireGuard = initial?.wireguard;
+  const [wsConfig, setWsConfig] = useState<WstunnelConfig>(initial?.wstunnel ?? {server_url: '', http_upgrade_path_prefix: 'v1', tls_verify_certificate: false, forwards: []});
+  const [importCommand, setImportCommand] = useState('');
+  const [importing, setImporting] = useState(false);
+  const [wgConfig, setWgConfig] = useState<WireGuardConfig>(
+    initialWireGuard ? {
+      addresses: initialWireGuard.addresses,
+      dns: initialWireGuard.dns,
+      mtu: initialWireGuard.mtu,
+      listen_port: initialWireGuard.listen_port,
+      private_key: { name: 'private_key', value: null, kind: initialWireGuard.private_key_configured ? 'Keep' : 'Clear' },
+      peers: initialWireGuard.peers,
+    } : {
+      addresses: [],
+      dns: [],
+      mtu: 1420,
+      listen_port: null,
+      private_key: { name: 'private_key', value: null, kind: 'Clear' },
+      peers: [],
+    },
+  );
+  const [wgConfigText, setWgConfigText] = useState('');
+  const importWstunnel = async () => {
+    const api = bridge();
+    if (!api) return setFormError('请在 Electron 桌面端导入命令');
+    setImporting(true); setFormError(null);
+    try {
+      const config = await api.request<WstunnelConfig>('parse_wstunnel_command', { command: importCommand });
+      setWsConfig(config);
+      if (!name.trim()) setName(`Wstunnel ${new URL(config.server_url).hostname}`);
+      setImportCommand('');
+    } catch (error) { setFormError(String(error)); } finally { setImporting(false); }
+  };
+  const importWireGuardConfig = async () => {
+    const api = bridge();
+    if (!api) return setFormError('请在 Electron 桌面端导入配置');
+    setImporting(true); setFormError(null);
+    try {
+      const config = await api.request<WireGuardConfig>('parse_wg_config', { config: wgConfigText });
+      setWgConfig(config);
+      if (!name.trim()) setName('WireGuard 隧道');
+      setWgConfigText('');
+      onNotify('已导入 wg-quick 配置', 'success');
+    } catch (error) {
+      setFormError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setImporting(false);
+    }
+  };
+  const [kind] = useState<ProxyKind>(initialKind);
   const [name, setName] = useState(initial?.name ?? '');
   const [tags, setTags] = useState(initial?.tags.join(', ') ?? '');
   const [listenPort, setListenPort] = useState(initialHttp?.listen_port ?? 0);
@@ -834,6 +988,33 @@ function ProfileEditor({
     setFormError(null);
     const trimmedName = name.trim();
     if (!trimmedName) return setFormError('请填写代理名称');
+    if (kind === 'Wstunnel') {
+      setSaving(true);
+      try { await onSave({ id: initial?.id ?? null, name: trimmedName, tags: tags.split(/[\n,]/).map(t => t.trim()).filter(Boolean), kind, http: null, ssh: null, wstunnel: wsConfig }); }
+      catch { /* parent displays save errors */ } finally { setSaving(false); }
+      return;
+    }
+    if (kind === 'WireGuard') {
+      if (wgConfig.addresses.length === 0) return setFormError('请导入或填写接口 Address');
+      if (!wgConfig.private_key.value && wgConfig.private_key.kind !== 'Keep') return setFormError('请填写 PrivateKey');
+      if (wgConfig.peers.length === 0) return setFormError('至少需要一个 [Peer]');
+      setSaving(true);
+      try {
+        await onSave({
+          id: initial?.id ?? null,
+          name: trimmedName,
+          tags: tags.split(/[\n,]/).map(t => t.trim()).filter(Boolean),
+          kind,
+          http: null,
+          ssh: null,
+          wstunnel: null,
+          wireguard: wgConfig,
+        });
+      } finally {
+        setSaving(false);
+      }
+      return;
+    }
     if (kind === 'Http') {
       if (!upstreamUrl.trim()) return setFormError('请填写上游基础 URL');
       const headerResult = buildSecretPatches(headers, removedHeaders, 'Header');
@@ -903,11 +1084,18 @@ function ProfileEditor({
     <div className="modal-backdrop">
       <div className="dialog" role="dialog" aria-modal="true" aria-labelledby="profile-editor-title">
         <div className="modal-heading">
-          <div><h2 id="profile-editor-title">{initial ? '编辑代理配置' : '新建代理配置'}</h2><p>配置完成后，服务只会绑定本机回环地址</p></div>
+          <div><h2 id="profile-editor-title">{initial ? `编辑${kindLabel(kind)}` : `新建${kindLabel(kind)}`}</h2><p>每种代理类型使用独立配置卡片</p></div>
           <button className="icon-button" onClick={onClose} title="关闭"><X size={18} /></button>
         </div>
         <form onSubmit={handleSubmit}>
           <div className="dialog-scroll">
+            {kind === 'Wstunnel' && (
+              <section className="form-section">
+                <div className="form-section-title"><h3>从命令快速导入</h3><span>粘贴 wstunnel client 命令，解析后可编辑并保存</span></div>
+                <div className="form-field"><textarea aria-label="Wstunnel 命令" className="mono-input" rows={3} value={importCommand} onChange={e => setImportCommand(e.target.value)} placeholder={"wstunnel client --http-upgrade-path-prefix XXXX -L 'udp://50814:localhost:50814?timeout_sec=0' wss://18.123.135.89:443"} /></div>
+                <button type="button" className="small-button" disabled={importing || !importCommand.trim()} onClick={() => void importWstunnel()}>{importing ? '解析中…' : '解析并填入配置'}</button>
+              </section>
+            )}
             <section className="form-section">
               <div className="form-section-title"><h3>基本信息</h3><span>可用标签帮助快速定位配置</span></div>
               <div className="form-grid">
@@ -916,12 +1104,37 @@ function ProfileEditor({
               </div>
             </section>
 
-            <section className="form-section">
-              <div className="form-section-title"><h3>代理类型</h3><span>运行中的配置需要先停止才能编辑</span></div>
-              <div className="segment-control"><button type="button" className={kind === 'Http' ? 'active' : ''} onClick={() => setKind('Http')}><Globe size={14} /> HTTP 反向代理</button><button type="button" className={kind === 'Ssh' ? 'active' : ''} onClick={() => setKind('Ssh')}><Terminal size={14} /> SSH 端口转发</button></div>
-            </section>
-
-            {kind === 'Http' ? (
+            {kind === 'WireGuard' ? (
+              <section className="form-section">
+                <div className="form-section-title"><h3>从 wg-quick 快速导入</h3><span>粘贴 [Interface] / [Peer] 配置，私钥只写入 Keychain</span></div>
+                <div className="form-field"><textarea aria-label="WireGuard 配置" className="mono-input" rows={10} value={wgConfigText} onChange={e => setWgConfigText(e.target.value)} placeholder={"[Interface]\nPrivateKey = ...\nAddress = 192.168.1.6/32\nMTU = 1420\nDNS = 223.5.5.5\n\n[Peer]\nPublicKey = ...\nEndpoint = localhost:50814\nAllowedIPs = 172.16.110.0/24,172.31.0.2/32\nPersistentKeepalive = 25"} /></div>
+                <button type="button" className="primary-button" disabled={importing || !wgConfigText.trim()} onClick={() => void importWireGuardConfig()}>{importing ? '导入中…' : '解析并导入'}</button>
+              </section>
+            ) : kind === 'Wstunnel' ? (
+              <section className="form-section">
+                <div className="form-section-title"><h3>Wstunnel 隧道</h3><span>内置 Rust 客户端 · UDP / TCP over WebSocket</span></div>
+                <div className="form-grid">
+                  <div className="form-field"><label>服务端 URL</label><input aria-label="Wstunnel 服务端" className="mono-input" value={wsConfig.server_url} onChange={e => setWsConfig({...wsConfig, server_url: e.target.value})} placeholder="wss://example.com:443" /></div>
+                  <div className="form-field"><label>HTTP Upgrade 路径前缀</label><input aria-label="Upgrade 路径前缀" className="mono-input" value={wsConfig.http_upgrade_path_prefix} onChange={e => setWsConfig({...wsConfig, http_upgrade_path_prefix: e.target.value})} /></div>
+                </div>
+                <label><input type="checkbox" checked={wsConfig.tls_verify_certificate} onChange={e => setWsConfig({...wsConfig, tls_verify_certificate: e.target.checked})} /> 校验 TLS 证书</label>
+                <p className="field-hint">导入时保留命令的证书校验选项。UDP 超时为 0 表示永不超时，留空使用默认 30 秒。</p>
+                {wsConfig.forwards.map((f, index) => {
+                  const update = (patch: Partial<typeof f>) => setWsConfig({...wsConfig, forwards: wsConfig.forwards.map((row, i) => i === index ? {...row, ...patch} : row)});
+                  return <div className="form-section" key={index}>
+                    <div className="form-grid three">
+                      <div className="form-field"><label>协议</label><select value={f.protocol} onChange={e => update({protocol: e.target.value, timeout_sec: null})}><option value="udp">UDP</option><option value="tcp">TCP</option></select></div>
+                      <div className="form-field"><label>本地端口</label><input type="number" min="1" max="65535" value={f.local_port} onChange={e => update({local_port: Number(e.target.value)})} /></div>
+                      <div className="form-field"><label>远端端口</label><input type="number" min="1" max="65535" value={f.remote_port} onChange={e => update({remote_port: Number(e.target.value)})} /></div>
+                      <div className="form-field"><label>远端主机</label><input value={f.remote_host} onChange={e => update({remote_host: e.target.value})} /></div>
+                      {f.protocol === 'udp' && <div className="form-field"><label>UDP 超时（秒）</label><input type="number" min="0" max="4294967295" placeholder="30" value={f.timeout_sec ?? ''} onChange={e => update({timeout_sec: e.target.value === '' ? null : Number(e.target.value)})} /></div>}
+                    </div>
+                    <button type="button" className="small-button" onClick={() => setWsConfig({...wsConfig, forwards: wsConfig.forwards.filter((_, i) => i !== index)})}>删除规则</button>
+                  </div>;
+                })}
+                <button type="button" className="small-button" onClick={() => setWsConfig({...wsConfig, forwards: [...wsConfig.forwards, {protocol: 'udp', local_port: 50814, remote_host: 'localhost', remote_port: 50814, timeout_sec: 0}]})}><Plus size={14} />添加转发规则</button>
+              </section>
+            ) : kind === 'Http' ? (
               <section className="form-section">
                 <div className="form-section-title"><h3>HTTP 转发</h3><span>支持 HTTP/HTTPS 上游与流式请求体</span></div>
                 <div className="form-grid">

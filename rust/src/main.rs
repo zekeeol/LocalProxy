@@ -72,7 +72,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         };
         let should_exit = request.method == "shutdown";
-        let response = handle_request(request);
+        let response = handle_request(request).await;
         write_json(&output, &response).await;
         if should_exit {
             break;
@@ -111,12 +111,32 @@ async fn write_json<T: Serialize>(output: &Output, value: &T) {
     let _ = output.flush().await;
 }
 
-fn handle_request(request: IpcRequest) -> IpcResponse {
+async fn handle_request(request: IpcRequest) -> IpcResponse {
     let id = request.id;
     let result = match request.method.as_str() {
+        "parse_wstunnel_command" => with_string(
+            &request.params,
+            "command",
+            local_proxy_rust::api::local_proxy::parse_wstunnel_command,
+        ),
+        "parse_wg_config" => with_string(
+            &request.params,
+            "config",
+            local_proxy_rust::api::local_proxy::parse_wg_config,
+        ),
+        "wireguard_status" => match request.params.get("id").and_then(Value::as_str) {
+            Some(id) if !id.trim().is_empty() => serialize_result(
+                local_proxy_rust::api::local_proxy::wireguard_status(id.to_owned()).await,
+            ),
+            _ => Err("缺少参数: id".to_string()),
+        },
         "ping" => Ok(json!({ "pong": true })),
         "list_profiles" => serialize_result(local_proxy_rust::api::local_proxy::list_profiles()),
-        "get_profile" => with_string(&request.params, "id", local_proxy_rust::api::local_proxy::get_profile),
+        "get_profile" => with_string(
+            &request.params,
+            "id",
+            local_proxy_rust::api::local_proxy::get_profile,
+        ),
         "get_settings" => serialize_result(local_proxy_rust::api::local_proxy::get_settings()),
         "save_settings" => with_params::<AppSettingsDraft, _, _>(
             &request.params,
@@ -126,16 +146,30 @@ fn handle_request(request: IpcRequest) -> IpcResponse {
             &request.params,
             local_proxy_rust::api::local_proxy::save_profile,
         ),
-        "delete_profile" => with_string(&request.params, "id", local_proxy_rust::api::local_proxy::delete_profile),
-        "start_profile" => with_string(&request.params, "id", local_proxy_rust::api::local_proxy::start_profile),
-        "stop_profile" => with_string(&request.params, "id", local_proxy_rust::api::local_proxy::stop_profile),
-        "confirm_host_key" => with_params::<ConfirmHostKeyParams, _, _>(&request.params, |params| {
-            local_proxy_rust::api::local_proxy::confirm_host_key(
-                params.id,
-                params.fingerprint,
-                params.accepted,
-            )
-        }),
+        "delete_profile" => with_string(
+            &request.params,
+            "id",
+            local_proxy_rust::api::local_proxy::delete_profile,
+        ),
+        "start_profile" => with_string(
+            &request.params,
+            "id",
+            local_proxy_rust::api::local_proxy::start_profile,
+        ),
+        "stop_profile" => with_string(
+            &request.params,
+            "id",
+            local_proxy_rust::api::local_proxy::stop_profile,
+        ),
+        "confirm_host_key" => {
+            with_params::<ConfirmHostKeyParams, _, _>(&request.params, |params| {
+                local_proxy_rust::api::local_proxy::confirm_host_key(
+                    params.id,
+                    params.fingerprint,
+                    params.accepted,
+                )
+            })
+        }
         "shutdown" => {
             if let Ok(profiles) = local_proxy_rust::api::local_proxy::list_profiles() {
                 for profile in profiles {

@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-12 -12 124 124" fill="none">
+  <defs>
+    <linearGradient id="localproxy-gradient" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d9488" />
+      <stop offset="0.42" stop-color="#0f766e" />
+      <stop offset="1" stop-color="#0284c7" />
+    </linearGradient>
+  </defs>
+  <rect width="100" height="100" rx="28" fill="url(#localproxy-gradient)" />
+  <g transform="translate(14 14) scale(.72)">
+    <circle cx="50" cy="50" r="16" stroke="#ffffff" stroke-width="10" />
+    <path d="M48 20A30 30 0 0 1 78 50" stroke="#ffffff" stroke-width="10" stroke-linecap="round" />
+    <path d="M52 80A30 30 0 0 1 22 50" stroke="#ffffff" stroke-width="10" stroke-linecap="round" />
+    <circle cx="74" cy="50" r="3.5" fill="#0891b2" />
+    <circle cx="26" cy="50" r="3.5" fill="#0891b2" />
+  </g>
+</svg>

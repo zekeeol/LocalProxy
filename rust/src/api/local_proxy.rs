@@ -6,6 +6,8 @@ use crate::core;
 pub enum ProxyType {
     Http,
     Ssh,
+    Wstunnel,
+    WireGuard,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -18,14 +20,14 @@ pub enum ServiceState {
     Error,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SecretPatchKind {
     Keep,
     Set,
     Clear,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretPatch {
     pub name: String,
     pub value: Option<String>,
@@ -68,6 +70,83 @@ pub struct SshDraft {
     pub use_system_proxy: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WstunnelForward {
+    pub protocol: String,
+    pub local_port: u16,
+    pub remote_host: String,
+    pub remote_port: u16,
+    pub timeout_sec: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WstunnelConfig {
+    pub server_url: String,
+    pub http_upgrade_path_prefix: String,
+    pub forwards: Vec<WstunnelForward>,
+    #[serde(default)]
+    pub tls_verify_certificate: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireGuardPeer {
+    pub public_key: String,
+    pub endpoint_host: String,
+    pub endpoint_port: u16,
+    pub allowed_ips: Vec<String>,
+    #[serde(default)]
+    pub persistent_keepalive: Option<u16>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireGuardConfig {
+    pub addresses: Vec<String>,
+    #[serde(default)]
+    pub dns: Vec<String>,
+    #[serde(default)]
+    pub mtu: Option<u16>,
+    #[serde(default)]
+    pub listen_port: Option<u16>,
+    pub private_key: SecretPatch,
+    pub peers: Vec<WireGuardPeer>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireGuardStatus {
+    pub interface_name: String,
+    pub listen_port: u16,
+    pub public_key: Option<String>,
+    pub peers: Vec<WireGuardPeerStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireGuardPeerStatus {
+    pub public_key: String,
+    pub endpoint: Option<String>,
+    pub allowed_ips: Vec<String>,
+    pub persistent_keepalive: Option<u16>,
+    pub handshake_age_sec: Option<u64>,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireGuardSetupResult {
+    pub interface_name: String,
+    pub listen_port: u16,
+    pub public_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireGuardView {
+    pub addresses: Vec<String>,
+    pub dns: Vec<String>,
+    pub mtu: Option<u16>,
+    pub listen_port: Option<u16>,
+    pub private_key_configured: bool,
+    pub peers: Vec<WireGuardPeer>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfileDraft {
     pub id: Option<String>,
@@ -76,6 +155,9 @@ pub struct ProfileDraft {
     pub kind: ProxyType,
     pub http: Option<HttpDraft>,
     pub ssh: Option<SshDraft>,
+    pub wstunnel: Option<WstunnelConfig>,
+    #[serde(default)]
+    pub wireguard: Option<WireGuardConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,12 +244,18 @@ pub struct ProfileView {
     pub error: Option<String>,
     pub http: Option<HttpView>,
     pub ssh: Option<SshView>,
+    pub wstunnel: Option<WstunnelConfig>,
+    pub wireguard: Option<WireGuardView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StartOutcome {
     Started,
     AlreadyRunning { endpoints: Vec<Endpoint> },
+}
+
+pub fn parse_wg_config(config: String) -> Result<WireGuardConfig, String> {
+    core::wireguard::parse_config(&config)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -229,4 +317,12 @@ pub fn confirm_host_key(id: String, fingerprint: String, accepted: bool) -> Resu
 
 pub fn subscribe_events() -> tokio::sync::broadcast::Receiver<ProxyEvent> {
     core::subscribe_events()
+}
+
+pub fn parse_wstunnel_command(command: String) -> Result<WstunnelConfig, String> {
+    core::wstunnel::parse_command(&command)
+}
+
+pub async fn wireguard_status(id: String) -> Result<Option<WireGuardStatus>, String> {
+    core::wireguard_status(&id).await
 }

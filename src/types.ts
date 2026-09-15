@@ -1,4 +1,4 @@
-export type ProxyKind = 'Http' | 'Ssh';
+export type ProxyKind = 'Http' | 'Ssh' | 'Wstunnel' | 'WireGuard';
 export type ServiceState =
   | 'Stopped'
   | 'Starting'
@@ -58,6 +58,54 @@ export type SshView = {
   use_system_proxy: boolean;
 };
 
+export type WstunnelConfig = {
+  server_url: string;
+  http_upgrade_path_prefix: string;
+  tls_verify_certificate: boolean;
+  forwards: { protocol: string; local_port: number; remote_host: string; remote_port: number; timeout_sec: number | null }[];
+};
+
+export type WireGuardPeer = {
+  public_key: string;
+  endpoint_host: string;
+  endpoint_port: number;
+  allowed_ips: string[];
+  persistent_keepalive: number | null;
+};
+
+export type WireGuardConfig = {
+  addresses: string[];
+  dns: string[];
+  mtu: number | null;
+  listen_port: number | null;
+  private_key: SecretPatch;
+  peers: WireGuardPeer[];
+};
+
+export type WireGuardView = {
+  addresses: string[];
+  dns: string[];
+  mtu: number | null;
+  listen_port: number | null;
+  private_key_configured: boolean;
+  peers: WireGuardPeer[];
+};
+
+export type WireGuardStatus = {
+  interface_name: string;
+  listen_port: number;
+  public_key: string | null;
+  peers: {
+    public_key: string;
+    endpoint: string | null;
+    allowed_ips: string[];
+    persistent_keepalive: number | null;
+    handshake_age_sec: number | null;
+    rx_bytes: number;
+    tx_bytes: number;
+  }[];
+};
+
 export type ProfileView = {
   id: string;
   name: string;
@@ -68,6 +116,8 @@ export type ProfileView = {
   error: string | null;
   http: HttpView | null;
   ssh: SshView | null;
+  wstunnel?: WstunnelConfig | null;
+  wireguard?: WireGuardView | null;
 };
 
 export type SecretPatch = {
@@ -84,6 +134,8 @@ export type ForwardDraft = {
 };
 
 export type ProfileDraft = {
+  wstunnel?: WstunnelConfig | null;
+  wireguard?: WireGuardConfig | null;
   id: string | null;
   name: string;
   tags: string[];
