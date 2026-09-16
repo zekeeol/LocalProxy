@@ -1106,7 +1106,7 @@ function ProfileEditor({
 
             {kind === 'WireGuard' ? (
               <section className="form-section">
-                <div className="form-section-title"><h3>从 wg-quick 快速导入</h3><span>粘贴 [Interface] / [Peer] 配置，私钥只写入 Keychain</span></div>
+                <div className="form-section-title"><h3>从 wg-quick 快速导入</h3><span>粘贴 [Interface] / [Peer] 配置，私钥只写入本地私密文件</span></div>
                 <div className="form-field"><textarea aria-label="WireGuard 配置" className="mono-input" rows={10} value={wgConfigText} onChange={e => setWgConfigText(e.target.value)} placeholder={"[Interface]\nPrivateKey = ...\nAddress = 192.168.1.6/32\nMTU = 1420\nDNS = 223.5.5.5\n\n[Peer]\nPublicKey = ...\nEndpoint = localhost:50814\nAllowedIPs = 172.16.110.0/24,172.31.0.2/32\nPersistentKeepalive = 25"} /></div>
                 <button type="button" className="primary-button" disabled={importing || !wgConfigText.trim()} onClick={() => void importWireGuardConfig()}>{importing ? '导入中…' : '解析并导入'}</button>
               </section>
@@ -1142,7 +1142,7 @@ function ProfileEditor({
                   <div className="form-field"><label>上游基础 URL</label><input className="mono-input" value={upstreamUrl} onChange={(event) => setUpstreamUrl(event.target.value)} placeholder="https://service.example.com" /><div className="field-hint">本地路径和 query 会追加到上游地址</div></div>
                 </div>
                 <div className="proxy-toggle-card"><div className="switch-row"><div className="switch-copy"><Globe size={16} /><div><strong>经过应用级 HTTP 代理</strong><span>{settings.http_proxy ? `当前代理：${formatAddress(settings.http_proxy.host, settings.http_proxy.port)}` : '请先在应用设置中配置 HTTP 代理'}</span></div></div><label className="switch"><input type="checkbox" checked={httpUseProxy} onChange={(event) => setHttpUseProxy(event.target.checked)} /><span /></label></div></div>
-                <SecretEditor title="Headers" hint="值只写入 macOS Keychain；客户端同名 header 会被覆盖" rows={headers} setRows={setHeaders} removed={removedHeaders} setRemoved={setRemovedHeaders} label="Header" onNotify={onNotify} />
+                <SecretEditor title="Headers" hint="值只写入本地私密文件；客户端同名 header 会被覆盖" rows={headers} setRows={setHeaders} removed={removedHeaders} setRemoved={setRemovedHeaders} label="Header" onNotify={onNotify} />
                 <SecretEditor title="Cookies" hint="按 cookie 名称合并，客户端同名 cookie 会被覆盖" rows={cookies} setRows={setCookies} removed={removedCookies} setRemoved={setRemovedCookies} label="Cookie" onNotify={onNotify} />
               </section>
             ) : (

@@ -5,7 +5,7 @@ LocalProxy 是一个只面向 macOS 的本地代理桌面应用，使用 Electro
 首期支持：
 
 - 固定上游的 HTTP/HTTPS 反向代理，支持 HTTP/1.1 流式请求/响应转发。
-- Headers/Cookies 配置按名称覆盖客户端同名值，敏感值只写入 macOS Keychain。
+- Headers/Cookies 配置按名称覆盖客户端同名值，敏感值只写入本地私密文件。
 - Wstunnel UDP/TCP over WebSocket（ws/wss），支持粘贴客户端命令快速导入。
 - SSH 密码或私钥文件认证、`direct-tcpip` 本地端口转发。
 - 应用级 HTTP/SOCKS5 出站代理；每个 HTTP/SSH profile 可单独选择是否经过它。
@@ -22,7 +22,7 @@ LocalProxy 是一个只面向 macOS 的本地代理桌面应用，使用 Electro
 ├── electron/                 # Electron 主进程、preload 与 Rust sidecar 管理
 ├── src/                      # React/TypeScript UI
 ├── rust/src/api/             # Electron 可调用的类型化业务 API
-├── rust/src/core/            # HTTP、SSH、Keychain、持久化与重连实现
+├── rust/src/core/            # HTTP、SSH、私密值持久化与重连实现
 └── assets/brand/             # LocalProxy 图标源文件
 ```
 
@@ -115,7 +115,7 @@ npm run build:mac
 ~/Library/Application Support/LocalProxy/profiles.json
 ```
 
-文件带有 `schemaVersion`，通过临时文件同步后原子替换。密码、私钥口令以及 HTTP header/cookie 值只写入 macOS Keychain；配置文件、UI 和脱敏日志不回显这些值。私钥本身不会复制到应用目录，只保存用户选择的路径。
+文件带有 `schemaVersion`，通过临时文件同步后原子替换。HTTP header/cookie 值、SSH 密码/私钥口令与 WireGuard 私钥统一写入 `private.json`，文件权限为 `0600`；配置文件、UI 和脱敏日志不回显这些值。SSH 私钥文件本身不会复制到应用目录，只保存用户选择的路径。
 
 HTTP 不支持 CONNECT、HTTP/2、HTTP/3、WebSocket 或 `Location` 重写；SSH 不支持远程端口转发、终端会话和 ssh-agent。HTTP 上游 TLS 默认严格校验证书；Wstunnel 的校验行为见上文。
 

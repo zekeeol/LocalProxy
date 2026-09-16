@@ -552,7 +552,11 @@ mod tests {
             data_dir: std::env::temp_dir()
                 .join(format!("local-proxy-test-{}", uuid::Uuid::new_v4())),
             store: Mutex::new(StoreFile::default()),
-            secrets: SecretStore,
+            secrets: SecretStore {
+                data_dir: std::env::temp_dir()
+                    .join(format!("local-proxy-secrets-test-{}", uuid::Uuid::new_v4())),
+                file_lock: Mutex::new(()),
+            },
             active: Mutex::new(HashMap::<String, ActiveService>::new()),
             statuses: Mutex::new(HashMap::<String, RuntimeSnapshot>::new()),
             pending_host_keys: Mutex::new(HashMap::<String, PendingHostKey>::new()),

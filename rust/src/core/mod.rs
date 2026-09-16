@@ -22,10 +22,9 @@ use crate::api::local_proxy::{
 };
 
 const SCHEMA_VERSION: u32 = 1;
-const SERVICE_NAME: &str = "com.localproxy.LocalProxy";
 const CONFIG_DIRECTORY: &str = "LocalProxy";
 const CONFIG_FILE: &str = "profiles.json";
-const WIREGUARD_SECRET_FILE: &str = "wireguard-private-keys.json";
+const PRIVATE_FILE: &str = "private.json";
 
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 static CONTROLLER: OnceLock<Arc<AppController>> = OnceLock::new();
@@ -149,112 +148,91 @@ struct StoredForward {
     tag: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct SecretStore {
     data_dir: PathBuf,
+    file_lock: Mutex<()>,
 }
 
 impl SecretStore {
-    fn username(profile_id: &str, category: &str, name: &str) -> String {
+    fn key(profile_id: &str, category: &str, name: &str) -> String {
         format!("{profile_id}:{category}:{name}")
     }
 
-    fn entry(profile_id: &str, category: &str, name: &str) -> Result<keyring::Entry, String> {
-        let username = Self::username(profile_id, category, name);
-        keyring::Entry::new(SERVICE_NAME, &username)
-            .map_err(|error| format!("Keychain 初始化失败: {error:?}"))
+    fn path(&self) -> PathBuf {
+        self.data_dir.join(PRIVATE_FILE)
     }
 
-    fn is_wireguard_private_key(category: &str, name: &str) -> bool {
-        category == "wireguard" && name == "private-key"
-    }
-
-    fn wireguard_key_path(&self) -> PathBuf {
-        self.data_dir.join(WIREGUARD_SECRET_FILE)
-    }
-
-    fn read_wireguard_keys(&self) -> Result<HashMap<String, String>, String> {
-        let path = self.wireguard_key_path();
+    fn read_all(&self) -> Result<HashMap<String, String>, String> {
+        let path = self.path();
         if !path.exists() {
             return Ok(HashMap::new());
         }
-        let bytes =
-            fs::read(&path).map_err(|error| format!("读取 WireGuard 密钥文件失败: {error}"))?;
-        serde_json::from_slice(&bytes)
-            .map_err(|error| format!("解析 WireGuard 密钥文件失败: {error}"))
+        let bytes = fs::read(&path).map_err(|error| format!("读取私密文件失败: {error}"))?;
+        serde_json::from_slice(&bytes).map_err(|error| format!("解析私密文件失败: {error}"))
     }
 
-    fn write_wireguard_keys(&self, keys: &HashMap<String, String>) -> Result<(), String> {
-        let path = self.wireguard_key_path();
-        let bytes = serde_json::to_vec_pretty(keys)
-            .map_err(|error| format!("序列化 WireGuard 密钥文件失败: {error}"))?;
+    fn write_all(&self, secrets: &HashMap<String, String>) -> Result<(), String> {
+        fs::create_dir_all(&self.data_dir)
+            .map_err(|error| format!("创建私密文件目录失败: {error}"))?;
+        let path = self.path();
+        let bytes = serde_json::to_vec_pretty(secrets)
+            .map_err(|error| format!("序列化私密文件失败: {error}"))?;
         let temporary = path.with_extension("json.tmp");
-        fs::write(&temporary, bytes)
-            .map_err(|error| format!("写入 WireGuard 密钥文件失败: {error}"))?;
+        fs::write(&temporary, bytes).map_err(|error| format!("写入私密文件失败: {error}"))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))
-                .map_err(|error| format!("设置 WireGuard 密钥文件权限失败: {error}"))?;
+                .map_err(|error| format!("设置私密文件权限失败: {error}"))?;
         }
-        fs::rename(&temporary, &path)
-            .map_err(|error| format!("保存 WireGuard 密钥文件失败: {error}"))?;
+        fs::rename(&temporary, &path).map_err(|error| format!("保存私密文件失败: {error}"))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-                .map_err(|error| format!("设置 WireGuard 密钥文件权限失败: {error}"))?;
+                .map_err(|error| format!("设置私密文件权限失败: {error}"))?;
         }
         Ok(())
-    }
-
-    fn set_wireguard_private_key(&self, profile_id: &str, value: &str) -> Result<(), String> {
-        let mut keys = self.read_wireguard_keys()?;
-        keys.insert(profile_id.to_owned(), value.to_owned());
-        self.write_wireguard_keys(&keys)?;
-        Ok(())
-    }
-
-    fn get_wireguard_private_key(&self, profile_id: &str) -> Result<String, String> {
-        let keys = self.read_wireguard_keys()?;
-        keys.get(profile_id)
-            .cloned()
-            .ok_or_else(|| "WireGuard PrivateKey 未配置".to_string())
     }
 
     fn set(&self, profile_id: &str, category: &str, name: &str, value: &str) -> Result<(), String> {
-        if Self::is_wireguard_private_key(category, name) {
-            return self.set_wireguard_private_key(profile_id, value);
-        }
-        Self::entry(profile_id, category, name)?
-            .set_password(value)
-            .map_err(|error| format!("Keychain 写入失败: {error:?}"))
+        let _guard = self
+            .file_lock
+            .lock()
+            .map_err(|_| "私密文件锁已损坏".to_string())?;
+        let mut secrets = self.read_all()?;
+        secrets.insert(Self::key(profile_id, category, name), value.to_owned());
+        self.write_all(&secrets)
     }
 
     fn get(&self, profile_id: &str, category: &str, name: &str) -> Result<String, String> {
-        if Self::is_wireguard_private_key(category, name) {
-            return self.get_wireguard_private_key(profile_id);
-        }
-        Self::entry(profile_id, category, name)?
-            .get_password()
-            .map_err(|error| format!("读取 Keychain 密钥失败: {error:?}"))
+        let _guard = self
+            .file_lock
+            .lock()
+            .map_err(|_| "私密文件锁已损坏".to_string())?;
+        self.read_all()?
+            .get(&Self::key(profile_id, category, name))
+            .cloned()
+            .ok_or_else(|| format!("私密值未配置: {category}/{name}"))
     }
 
     fn delete(&self, profile_id: &str, category: &str, name: &str) {
-        if Self::is_wireguard_private_key(category, name) {
-            if let Ok(mut keys) = self.read_wireguard_keys() {
-                if keys.remove(profile_id).is_some() {
-                    if keys.is_empty() {
-                        let _ = fs::remove_file(self.wireguard_key_path());
-                    } else {
-                        let _ = self.write_wireguard_keys(&keys);
-                    }
-                }
-            }
+        let Ok(_guard) = self.file_lock.lock() else {
             return;
-        }
-        if let Ok(entry) = Self::entry(profile_id, category, name) {
-            let _ = entry.delete_credential();
+        };
+        if let Ok(mut secrets) = self.read_all() {
+            if secrets
+                .remove(&Self::key(profile_id, category, name))
+                .is_none()
+            {
+                return;
+            }
+            if secrets.is_empty() {
+                let _ = fs::remove_file(self.path());
+            } else {
+                let _ = self.write_all(&secrets);
+            }
         }
     }
 
@@ -299,6 +277,7 @@ pub(crate) fn init() {
         store: Mutex::new(store),
         secrets: SecretStore {
             data_dir: data_dir.clone(),
+            file_lock: Mutex::new(()),
         },
         active: Mutex::new(HashMap::new()),
         statuses: Mutex::new(HashMap::new()),
@@ -1632,7 +1611,87 @@ fn validate_port(port: u16, label: &str) -> Result<(), String> {
 mod tests {
     use super::{
         format_forward_target, normalize_forward_host, normalize_forward_tag, normalize_tags,
+        SecretStore, PRIVATE_FILE,
     };
+    use std::sync::Mutex;
+
+    fn test_secret_store() -> SecretStore {
+        SecretStore {
+            data_dir: std::env::temp_dir()
+                .join(format!("local-proxy-secret-store-{}", uuid::Uuid::new_v4())),
+            file_lock: Mutex::new(()),
+        }
+    }
+
+    #[test]
+    fn stores_all_secret_categories_in_one_private_file() {
+        let store = test_secret_store();
+        store
+            .set(
+                "http-profile",
+                "http-header",
+                "Authorization",
+                "Bearer token",
+            )
+            .unwrap();
+        store
+            .set("ssh-profile", "ssh", "password", "ssh-secret")
+            .unwrap();
+        store
+            .set(
+                "wireguard-profile",
+                "wireguard",
+                "private-key",
+                "wireguard-secret",
+            )
+            .unwrap();
+
+        assert_eq!(
+            store
+                .get("http-profile", "http-header", "Authorization")
+                .unwrap(),
+            "Bearer token"
+        );
+        assert_eq!(
+            store.get("ssh-profile", "ssh", "password").unwrap(),
+            "ssh-secret"
+        );
+        assert_eq!(
+            store
+                .get("wireguard-profile", "wireguard", "private-key")
+                .unwrap(),
+            "wireguard-secret"
+        );
+        assert!(store.data_dir.join(PRIVATE_FILE).is_file());
+
+        store.delete("ssh-profile", "ssh", "password");
+        assert!(store.get("ssh-profile", "ssh", "password").is_err());
+        assert_eq!(
+            store
+                .get("wireguard-profile", "wireguard", "private-key")
+                .unwrap(),
+            "wireguard-secret"
+        );
+
+        std::fs::remove_dir_all(&store.data_dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let store = test_secret_store();
+        store.set("profile", "ssh", "password", "secret").unwrap();
+        let mode = std::fs::metadata(store.data_dir.join(PRIVATE_FILE))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+
+        std::fs::remove_dir_all(&store.data_dir).unwrap();
+    }
 
     #[test]
     fn normalizes_and_deduplicates_tags() {
