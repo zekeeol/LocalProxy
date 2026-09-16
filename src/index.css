@@ -415,16 +415,17 @@ button,
   width: 100%;
   margin: 0;
   padding: 14px;
-  border: 1px solid transparent;
+  border: 1px solid #d8e8ea;
   border-radius: 15px;
+  background: rgba(255, 255, 255, 0.72);
   color: var(--ink-soft);
   text-align: left;
   transition: 150ms ease;
 }
 
 .profile-card:hover {
-  border-color: #c8dadd;
-  background: rgba(255, 255, 255, 0.55);
+  border-color: #b9d9dd;
+  background: #ffffff;
 }
 
 .profile-card.selected {
@@ -1846,6 +1847,7 @@ button,
   .titlebar-left { min-width: 0; }
   .titlebar-actions { min-width: 0; }
   .titlebar-actions .ghost-button { display: none; }
+  .titlebar-actions .ghost-button.language-switch { display: inline-flex; padding-right: 6px; }
   .sidebar { display: none; }
   .content { padding: 18px 14px 28px; }
   .dialog-scroll { padding: 16px; }
@@ -1866,3 +1868,19 @@ button,
   .forward-row { grid-template-columns: 1fr 1fr 1fr 1fr 30px; }
   .log-row { grid-template-columns: 62px 70px minmax(0, 1fr); gap: 6px; }
 }
+
+.language-switch { gap: 6px; padding-right: 10px; }
+.language-switch select {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+  outline: none;
+}
+.language-switch select:focus-visible { text-decoration: underline; }
+
+.language-field { max-width: 260px; }
+.language-select { width: 100%; }

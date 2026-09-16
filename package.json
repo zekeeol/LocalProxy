@@ -1,6 +1,6 @@
 {
   "name": "localproxy",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "author": "LocalProxy Team",
   "description": "LocalProxy - Electron UI with a Rust networking core",
@@ -19,9 +19,11 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "i18next": "^26.4.2",
     "lucide-react": "^0.468.0",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "react-i18next": "^17.0.14"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
@@ -62,7 +64,10 @@
     ],
     "mac": {
       "category": "public.app-category.utilities",
-      "target": ["dmg", "dir"],
+      "target": [
+        "dmg",
+        "dir"
+      ],
       "icon": "electron/localproxy.icns"
     },
     "dmg": {

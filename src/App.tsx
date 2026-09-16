@@ -7,6 +7,8 @@ import {
   useMemo,
   useState,
 } from 'react';
+import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import {
   Activity,
   AlertCircle,
@@ -40,6 +42,7 @@ import {
   X,
 } from 'lucide-react';
 import logoMark from '../assets/brand/localproxy-logo.svg';
+import i18n, { changeLanguage, LANGUAGES, type LanguageCode } from './i18n';
 import type {
   WstunnelConfig,
   WireGuardStatus,
@@ -84,9 +87,10 @@ function bridge(): RustBridge | null {
   return window.electronAPI ?? null;
 }
 
-function formatAddress(host: string, port: number): string {
+function formatAddress(host: string, port: number, t?: TFunction): string {
   const formattedHost = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
-  return port > 0 ? `${formattedHost}:${port}` : `${formattedHost}:随机端口`;
+  if (port <= 0) return `${formattedHost}:${t ? t('common.randomPort') : i18n.t('common.randomPort')}`;
+  return `${formattedHost}:${port}`;
 }
 
 function formatBytes(value: number): string {
@@ -112,39 +116,34 @@ function stateClass(state: ServiceState): string {
   }
 }
 
-function stateLabel(state: ServiceState): string {
+function stateLabel(state: ServiceState, t: TFunction): string {
   switch (state) {
     case 'Running':
-      return '运行中';
+      return t('state.running');
     case 'Starting':
-      return '启动中';
+      return t('state.starting');
     case 'AwaitingHostKey':
-      return '等待确认';
+      return t('state.awaiting');
     case 'Reconnecting':
-      return '自动重连';
+      return t('state.reconnecting');
     case 'Error':
-      return '错误';
+      return t('state.error');
     default:
-      return '已停止';
+      return t('state.stopped');
   }
 }
 
-function kindLabel(kind: ProxyKind): string {
-  switch (kind) {
-    case 'Http': return 'HTTP 反向代理';
-    case 'Wstunnel': return 'Wstunnel 隧道';
-    case 'WireGuard': return 'WireGuard 隧道';
-    default: return 'SSH 端口转发';
-  }
+function kindLabel(kind: ProxyKind, t: TFunction): string {
+  return t(`kind.${kind.toLowerCase()}`);
 }
 
 function isActive(state: ServiceState): boolean {
   return state === 'Running' || state === 'Starting' || state === 'AwaitingHostKey' || state === 'Reconnecting';
 }
 
-function endpointForProfile(profile: ProfileView): Endpoint[] {
+function endpointForProfile(profile: ProfileView, t: TFunction): Endpoint[] {
   if (profile.endpoints.length > 0) return profile.endpoints;
-  if (profile.wstunnel) return profile.wstunnel.forwards.map(f => ({kind: f.protocol, host: '127.0.0.1', port: f.local_port, description: `${f.protocol.toUpperCase()} → ${formatAddress(f.remote_host, f.remote_port)}`}));
+  if (profile.wstunnel) return profile.wstunnel.forwards.map(f => ({kind: f.protocol, host: '127.0.0.1', port: f.local_port, description: `${f.protocol.toUpperCase()} → ${formatAddress(f.remote_host, f.remote_port, t)}`}));
   if (profile.wireguard) {
     return [{
       kind: 'wireguard',
@@ -159,7 +158,7 @@ function endpointForProfile(profile: ProfileView): Endpoint[] {
         kind: 'http',
         host: '127.0.0.1',
         port: profile.http.listen_port,
-        description: 'HTTP 本地反向代理',
+        description: t('app.localHttpProxy'),
       },
     ];
   }
@@ -167,18 +166,18 @@ function endpointForProfile(profile: ProfileView): Endpoint[] {
     kind: 'sshForward',
     host: '127.0.0.1',
     port: forward.local_port,
-    description: `SSH → ${formatAddress(forward.remote_host, forward.remote_port)}`,
+    description: `SSH → ${formatAddress(forward.remote_host, forward.remote_port, t)}`,
   }));
 }
 
-function endpointForSummary(profile: ProfileSummary): string {
+function endpointForSummary(profile: ProfileSummary, t: TFunction): string {
   const first = profile.endpoints[0];
-  if (!first) return '启动后显示本地地址';
-  return formatAddress(first.host, first.port);
+  if (!first) return t('app.localAddressAfterStart');
+  return formatAddress(first.host, first.port, t);
 }
 
 function nowTime(): string {
-  return new Date().toLocaleTimeString('zh-CN', { hour12: false });
+  return new Date().toLocaleTimeString(i18n.language || 'en', { hour12: false });
 }
 
 async function copyText(value: string): Promise<boolean> {
@@ -245,14 +244,15 @@ function buildSecretPatches(
   rows: SecretRow[],
   removed: Set<string>,
   label: string,
+  t: TFunction,
 ): { patches: SecretPatch[]; error: string | null } {
   const patches: SecretPatch[] = [];
   for (const row of rows) {
     const name = row.name.trim();
     const value = row.value;
     if (!name && !value) continue;
-    if (!name) return { patches: [], error: `${label}名称不能为空` };
-    if (!row.configured && !value) return { patches: [], error: `${name}需要填写值` };
+    if (!name) return { patches: [], error: t('common.labelNameEmpty', { label }) };
+    if (!row.configured && !value) return { patches: [], error: t('common.nameRequiredValue', { name }) };
     if (row.originalName && row.originalName !== name) {
       patches.push({ name: row.originalName, value: null, kind: 'Clear' });
     }
@@ -275,6 +275,7 @@ function AppLogo({ large = false }: { large?: boolean }) {
 }
 
 export default function App() {
+  const { t } = useTranslation();
   const [profiles, setProfiles] = useState<ProfileSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selected, setSelected] = useState<ProfileView | null>(null);
@@ -297,9 +298,9 @@ export default function App() {
 
   const request = useCallback(async <T,>(method: string, params: unknown = {}): Promise<T> => {
     const currentBridge = bridge();
-    if (!currentBridge) throw new Error('请通过 LocalProxy Electron 桌面端运行');
+    if (!currentBridge) throw new Error(t('app.runInDesktop'));
     return currentBridge.request<T>(method, params);
-  }, []);
+  }, [t]);
 
   const loadProfile = useCallback(async (id: string) => {
     const profile = await request<ProfileView>('get_profile', { id });
@@ -325,17 +326,17 @@ export default function App() {
       else setSelected(null);
     } catch (error) {
       setEngineReady(false);
-      if (!quiet) notify(error instanceof Error ? error.message : '刷新失败', 'error');
+      if (!quiet) notify(error instanceof Error ? error.message : t('common.refreshFailed'), 'error');
     } finally {
       setRefreshing(false);
     }
-  }, [loadProfile, notify, request, selectedId]);
+  }, [loadProfile, notify, request, selectedId, t]);
 
   const handleRustEvent = useCallback((event: { event: string; payload: unknown }) => {
     if (event.event === 'core_exit') {
       setEngineReady(false);
       const payload = event.payload as { message?: string };
-      notify(payload.message || 'Rust Core 已退出', 'error');
+      notify(payload.message || t('app.coreExited'), 'error');
       return;
     }
     if (event.event !== 'proxy_event') return;
@@ -363,7 +364,7 @@ export default function App() {
       setHostKey({
         id: proxyEvent.profile_id,
         fingerprint: proxyEvent.fingerprint,
-        message: proxyEvent.message || '首次连接需要确认 SSH 主机密钥',
+        message: proxyEvent.message || t('app.hostKeyNeeded'),
       });
     }
     if (proxyEvent.kind === 'Log' || proxyEvent.message) {
@@ -377,7 +378,7 @@ export default function App() {
         ...current.slice(0, 99),
       ]);
     }
-  }, [notify]);
+  }, [notify, t]);
 
   useEffect(() => {
     const unsubscribe = bridge()?.onRustEvent(handleRustEvent);
@@ -392,7 +393,7 @@ export default function App() {
     try {
       await loadProfile(id);
     } catch (error) {
-      notify(error instanceof Error ? error.message : '读取代理配置失败', 'error');
+      notify(error instanceof Error ? error.message : t('app.loadProfileFailed'), 'error');
     }
   };
 
@@ -401,14 +402,14 @@ export default function App() {
     try {
       if (isActive(selected.state)) {
         await request('stop_profile', { id: selected.id });
-        notify(`已停止 ${selected.name}`, 'info');
+        notify(t('app.stopped', { name: selected.name }), 'info');
       } else {
         await request('start_profile', { id: selected.id });
-        notify(`正在启动 ${selected.name}`, 'success');
+        notify(t('app.starting', { name: selected.name }), 'success');
       }
       await refresh(true);
     } catch (error) {
-      notify(error instanceof Error ? error.message : '操作失败', 'error');
+      notify(error instanceof Error ? error.message : t('common.operationFailed'), 'error');
       await refresh(true);
     }
   };
@@ -419,22 +420,22 @@ export default function App() {
       setEditor(undefined);
       setSelectedId(saved.id);
       setSelected(saved);
-      notify('代理配置已保存', 'success');
+      notify(t('app.profileSaved'), 'success');
       await refresh(true);
     } catch (error) {
-      notify(error instanceof Error ? error.message : '保存配置失败', 'error');
+      notify(error instanceof Error ? error.message : t('app.saveFailed'), 'error');
       throw error;
     }
   };
 
   const handleDelete = async () => {
-    if (!selected || !window.confirm(`确定删除“${selected.name}”吗？`)) return;
+    if (!selected || !window.confirm(t('app.deleteConfirm', { name: selected.name }))) return;
     try {
       await request('delete_profile', { id: selected.id });
-      notify('代理配置已删除', 'info');
+      notify(t('app.profileDeleted'), 'info');
       await refresh(true);
     } catch (error) {
-      notify(error instanceof Error ? error.message : '删除配置失败', 'error');
+      notify(error instanceof Error ? error.message : t('app.deleteFailed'), 'error');
     }
   };
 
@@ -448,10 +449,10 @@ export default function App() {
         fingerprint: current.fingerprint,
         accepted,
       });
-      if (accepted) notify('已保存 SSH 主机密钥并继续连接', 'success');
-      else notify('已拒绝 SSH 主机密钥', 'info');
+      if (accepted) notify(t('app.hostKeySaved'), 'success');
+      else notify(t('app.hostKeyRejected'), 'info');
     } catch (error) {
-      notify(error instanceof Error ? error.message : '主机密钥确认失败', 'error');
+      notify(error instanceof Error ? error.message : t('app.hostKeyFailed'), 'error');
     }
   };
 
@@ -483,7 +484,7 @@ export default function App() {
                 onDelete={() => void handleDelete()}
                 onCopy={async (text) => {
                   const copied = await copyText(text);
-                  notify(copied ? `已复制 ${text}` : '复制失败，请手动复制', copied ? 'success' : 'error');
+                  notify(copied ? t('common.copied', { value: text }) : t('common.copyFailed'), copied ? 'success' : 'error');
                 }}
                 onClearLogs={() => setLogs([])}
               />
@@ -521,7 +522,7 @@ export default function App() {
           onSaved={(next) => {
             setSettings(next);
             setSettingsOpen(false);
-            notify('应用设置已保存', 'success');
+            notify(t('app.settingsSaved'), 'success');
           }}
           request={request}
           onNotify={notify}
@@ -544,14 +545,16 @@ function Titlebar({
   onRefresh: () => void;
   onOpenSettings: () => void;
 }) {
+  const { t, i18n } = useTranslation();
   const currentBridge = bridge();
+  const currentLanguage = LANGUAGES.find((language) => i18n.language.startsWith(language.code))?.code ?? 'en';
   return (
     <header className="titlebar">
       <div className="titlebar-left">
-        <div className="traffic-lights" aria-label="窗口控制">
-          <button className="traffic-light close" onClick={() => currentBridge?.closeWindow()} aria-label="关闭" />
-          <button className="traffic-light minimize" onClick={() => currentBridge?.minimizeWindow()} aria-label="最小化" />
-          <button className="traffic-light maximize" onClick={() => currentBridge?.maximizeWindow()} aria-label="最大化" />
+        <div className="traffic-lights" aria-label={t('titlebar.windowControls')}>
+          <button className="traffic-light close" onClick={() => currentBridge?.closeWindow()} aria-label={t('titlebar.closeWindow')} />
+          <button className="traffic-light minimize" onClick={() => currentBridge?.minimizeWindow()} aria-label={t('titlebar.minimizeWindow')} />
+          <button className="traffic-light maximize" onClick={() => currentBridge?.maximizeWindow()} aria-label={t('titlebar.maximizeWindow')} />
         </div>
         <div className="brand-lockup">
           <AppLogo />
@@ -564,14 +567,26 @@ function Titlebar({
       </div>
       <div className="engine-pill">
         <span className={`engine-dot${engineReady ? '' : ' offline'}`} />
-        {engineReady ? 'Rust Tokio · IPC 已连接' : 'Rust Core 未连接'}
+        {engineReady ? t('titlebar.engineConnected') : t('titlebar.engineOffline')}
       </div>
       <div className="titlebar-actions">
-        <button className="ghost-button" onClick={onOpenSettings} title="应用级 HTTP / SOCKS5 出站代理设置">
+        <label className="ghost-button language-switch" title={t('titlebar.language')}>
+          <Globe size={14} />
+          <select
+            value={currentLanguage}
+            aria-label={t('titlebar.language')}
+            onChange={(event) => changeLanguage(event.target.value as LanguageCode)}
+          >
+            {LANGUAGES.map((language) => (
+              <option key={language.code} value={language.code}>{language.label}</option>
+            ))}
+          </select>
+        </label>
+        <button className="ghost-button" onClick={onOpenSettings} title={t('titlebar.appSettingsTitle')}>
           <Settings size={14} />
-          应用设置
+          {t('titlebar.appSettings')}
         </button>
-        <button className="icon-button" onClick={onRefresh} title="刷新配置与运行状态" disabled={refreshing}>
+        <button className="icon-button" onClick={onRefresh} title={t('titlebar.refreshTitle')} disabled={refreshing}>
           <RefreshCw size={17} className={refreshing ? 'spinner' : ''} />
         </button>
       </div>
@@ -590,27 +605,28 @@ function Sidebar({
   onSelect: (id: string) => void;
   onCreate: () => void;
 }) {
+  const { t } = useTranslation();
   return (
     <aside className="sidebar">
       <div className="sidebar-header">
         <div className="sidebar-heading">
           <h2>
-            代理配置 <span className="count-badge">{profiles.length}</span>
+            {t('sidebar.heading')} <span className="count-badge">{profiles.length}</span>
           </h2>
-          <button className="add-button" onClick={onCreate} title="新建代理配置">
+          <button className="add-button" onClick={onCreate} title={t('sidebar.addTitle')}>
             <Plus size={20} />
           </button>
         </div>
         <div className="loopback-badge">
           <Lock size={15} />
-          <span>127.0.0.1 · 仅本机可访问</span>
+          <span>{t('sidebar.loopback')}</span>
         </div>
       </div>
       <div className="sidebar-list">
         {profiles.length === 0 ? (
           <div className="empty-sidebar">
-            <strong>还没有代理配置</strong>
-            <span>点击右上角 + 开始创建</span>
+            <strong>{t('sidebar.emptyTitle')}</strong>
+            <span>{t('sidebar.emptyHint')}</span>
           </div>
         ) : (
           profiles.map((profile) => (
@@ -624,14 +640,14 @@ function Sidebar({
                   <div className="profile-title">{profile.name}</div>
                   <div className="profile-type">
                     {profile.kind === 'Http' ? <Globe size={14} /> : profile.kind === 'WireGuard' ? <ShieldCheck size={14} /> : profile.kind === 'Wstunnel' ? <Link2 size={14} /> : <Terminal size={14} />}
-                    {kindLabel(profile.kind)}
+                    {kindLabel(profile.kind, t)}
                   </div>
                 </div>
                 <span className={`state-dot ${stateClass(profile.state)}`} />
               </div>
               <div className="profile-endpoint-row">
                 <Link2 size={13} />
-                <span>{endpointForSummary(profile)}</span>
+                <span>{endpointForSummary(profile, t)}</span>
               </div>
               {profile.tags.length > 0 && (
                 <div className="profile-tags">
@@ -643,7 +659,7 @@ function Sidebar({
         )}
       </div>
       <div className="sidebar-footer">
-        <div className="daemon-state"><ShieldCheck size={15} color="#219653" /><span>Rust Core 私有通道</span></div>
+        <div className="daemon-state"><ShieldCheck size={15} color="#219653" /><span>{t('sidebar.privateChannel')}</span></div>
         <span>NDJSON IPC</span>
       </div>
     </aside>
@@ -651,12 +667,13 @@ function Sidebar({
 }
 
 function EmptyState({ onCreate, engineReady }: { onCreate: () => void; engineReady: boolean }) {
+  const { t } = useTranslation();
   return (
     <div className="empty-state">
       <AppLogo large />
-      <h2>{engineReady ? '开始管理本地代理' : '等待 Rust Core 连接'}</h2>
-      <p>{engineReady ? '创建 HTTP 反向代理、SSH 或 Wstunnel 本地端口转发。所有服务只监听 127.0.0.1，实际端口会在启动后同步显示。' : '请从 Electron 桌面端启动，并确认 Rust Core 已完成编译。'}</p>
-      {engineReady && <div className="empty-actions"><button className="primary-button" onClick={onCreate}><Plus size={15} />新建代理配置</button></div>}
+      <h2>{engineReady ? t('empty.readyTitle') : t('empty.waitingTitle')}</h2>
+      <p>{engineReady ? t('empty.readyDesc') : t('empty.waitingDesc')}</p>
+      {engineReady && <div className="empty-actions"><button className="primary-button" onClick={onCreate}><Plus size={15} />{t('empty.create')}</button></div>}
     </div>
   );
 }
@@ -682,10 +699,11 @@ function DetailView({
   onCopy: (text: string) => Promise<void>;
   onClearLogs: () => void;
 }) {
+  const { t } = useTranslation();
   const [menuOpen, setMenuOpen] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
   const [wgStatus, setWgStatus] = useState<WireGuardStatus | null>(null);
-  const endpoints = endpointForProfile(profile);
+  const endpoints = endpointForProfile(profile, t);
   const active = isActive(profile.state);
   const proxy = profile.kind === 'Http' ? settings.http_proxy : settings.socks_proxy;
 
@@ -731,25 +749,25 @@ function DetailView({
             <div className="detail-subtitle">
               <span className={`status-badge ${stateClass(profile.state)}`}>
                 <span className={`status-dot ${stateClass(profile.state)}`} />
-                {stateLabel(profile.state)}
+                {stateLabel(profile.state, t)}
               </span>
-              <span className="type-pill">{kindLabel(profile.kind)}</span>
+              <span className="type-pill">{kindLabel(profile.kind, t)}</span>
               {profile.tags.map((tag) => <span className="tag" key={tag}><Tag size={11} />{tag}</span>)}
             </div>
           </div>
         </div>
         <div className="detail-actions">
           <button className={active ? 'danger-button' : 'primary-button'} onClick={onToggle} disabled={!bridge()}>
-            {active ? <><Square size={14} fill="currentColor" />停止</> : <><Play size={14} fill="currentColor" />启动</>}
+            {active ? <><Square size={14} fill="currentColor" />{t('common.stop')}</> : <><Play size={14} fill="currentColor" />{t('common.start')}</>}
           </button>
-          <button className="outline-button" onClick={onEdit} disabled={!bridge()}><Pencil size={14} />编辑</button>
+          <button className="outline-button" onClick={onEdit} disabled={!bridge()}><Pencil size={14} />{t('common.edit')}</button>
           <div style={{ position: 'relative' }}>
-            <button className="icon-button" onClick={() => setMenuOpen((open) => !open)} title="更多操作"><MoreHorizontal size={19} /></button>
+            <button className="icon-button" onClick={() => setMenuOpen((open) => !open)} title={t('detail.moreActions')}><MoreHorizontal size={19} /></button>
             {menuOpen && (
               <div className="floating-menu" onMouseLeave={() => setMenuOpen(false)}>
-                {sshCommand && <button onClick={() => { void copyEndpoint(sshCommand); setMenuOpen(false); }}><Clipboard size={14} />复制 SSH 命令</button>}
-                {endpoints[0] && <button onClick={() => { void copyEndpoint(formatAddress(endpoints[0].host, endpoints[0].port)); setMenuOpen(false); }}><Copy size={14} />复制第一个端点</button>}
-                <button className="menu-danger" onClick={() => { setMenuOpen(false); onDelete(); }}><Trash2 size={14} />删除配置</button>
+                {sshCommand && <button onClick={() => { void copyEndpoint(sshCommand); setMenuOpen(false); }}><Clipboard size={14} />{t('detail.copySshCommand')}</button>}
+                {endpoints[0] && <button onClick={() => { void copyEndpoint(formatAddress(endpoints[0].host, endpoints[0].port, t)); setMenuOpen(false); }}><Copy size={14} />{t('detail.copyFirstEndpoint')}</button>}
+                <button className="menu-danger" onClick={() => { setMenuOpen(false); onDelete(); }}><Trash2 size={14} />{t('detail.deleteConfig')}</button>
               </div>
             )}
           </div>
@@ -762,35 +780,35 @@ function DetailView({
 
       <section className="surface-card">
         <div className="section-title">
-          <div className="section-title-left"><span className="section-icon"><Layers size={15} /></span><div><h2>本地端点</h2><p>代理的具体调用地址，启动后会显示实际绑定端口</p></div></div>
-          <div className="section-title-right"><CheckCircle2 size={14} color="#219653" />&nbsp;仅监听 127.0.0.1</div>
+          <div className="section-title-left"><span className="section-icon"><Layers size={15} /></span><div><h2>{t('detail.endpointsTitle')}</h2><p>{t('detail.endpointsDesc')}</p></div></div>
+          <div className="section-title-right"><CheckCircle2 size={14} color="#219653" />&nbsp;{t('detail.listenLocalOnly')}</div>
         </div>
         {profile.kind === 'Ssh' && profile.ssh?.use_system_proxy && (
           <RouteBanner ssh={profile.ssh} proxy={settings.socks_proxy} />
         )}
         {profile.kind === 'Http' && profile.http?.use_system_proxy && (
           <div className="route-banner">
-            <div className="route-banner-header"><Globe size={15} />HTTP 上游连接将经过应用级 HTTP 代理</div>
-            <div className="route-flow"><span className="route-step"><strong>LocalProxy</strong> 本地监听</span><span className="route-arrow">→</span><span className="route-step"><strong>HTTP Proxy</strong> {proxy ? formatAddress(proxy.host, proxy.port) : '未配置'}</span><span className="route-arrow">→</span><span className="route-step"><strong>上游服务</strong> {profile.http.upstream_url}</span></div>
+            <div className="route-banner-header"><Globe size={15} />{t('detail.httpProxyRoute')}</div>
+            <div className="route-flow"><span className="route-step"><strong>LocalProxy</strong> {t('detail.localListen')}</span><span className="route-arrow">→</span><span className="route-step"><strong>HTTP Proxy</strong> {proxy ? formatAddress(proxy.host, proxy.port, t) : t('common.notConfigured')}</span><span className="route-arrow">→</span><span className="route-step"><strong>{t('detail.upstreamService')}</strong> {profile.http.upstream_url}</span></div>
           </div>
         )}
         <div className="endpoint-grid">
           {endpoints.length === 0 ? (
-            <div className="empty-sidebar"><strong>暂无端点</strong><span>添加 SSH 转发规则后启动即可使用</span></div>
+            <div className="empty-sidebar"><strong>{t('detail.noEndpoints')}</strong><span>{t('detail.noEndpointsHint')}</span></div>
           ) : endpoints.map((endpoint, index) => {
-            const address = formatAddress(endpoint.host, endpoint.port);
+            const address = formatAddress(endpoint.host, endpoint.port, t);
             const wsForward = profile.wstunnel?.forwards[index];
-            const forward = profile.ssh?.forwards[index] ?? (wsForward ? { ...wsForward, tag: wsForward.protocol.toUpperCase() + ' 本地转发' } : undefined);
+            const forward = profile.ssh?.forwards[index] ?? (wsForward ? { ...wsForward, tag: t('detail.localForwardTag', { proto: wsForward.protocol.toUpperCase() }) } : undefined);
             const isCopied = copied === address;
             if (profile.kind === 'WireGuard') {
               const peer = profile.wireguard?.peers[index] ?? profile.wireguard?.peers[0];
               return (
                 <div className="endpoint-card" key={`${endpoint.kind}-${index}-${endpoint.port}`}>
                   <div className="endpoint-card-top">
-                    <div className="endpoint-kind"><span className="endpoint-kind-icon"><ShieldCheck size={15} /></span><div><strong>{endpoint.host}</strong><div className="endpoint-state">{stateLabel(profile.state)} · WireGuard 接口</div></div></div>
+                    <div className="endpoint-kind"><span className="endpoint-kind-icon"><ShieldCheck size={15} /></span><div><strong>{endpoint.host}</strong><div className="endpoint-state">{stateLabel(profile.state, t)} · {t('detail.wgInterface')}</div></div></div>
                   </div>
-                  <div className="copyable-address"><span>{profile.wireguard?.addresses.join(', ') || '未配置地址'}</span></div>
-                  <div className="endpoint-remote">对端 · {peer ? `${peer.endpoint_host}:${peer.endpoint_port}` : '未配置'}</div>
+                  <div className="copyable-address"><span>{profile.wireguard?.addresses.join(', ') || t('detail.noAddress')}</span></div>
+                  <div className="endpoint-remote">{t('detail.peer')} · {peer ? `${peer.endpoint_host}:${peer.endpoint_port}` : t('common.notConfigured')}</div>
                   <div className="endpoint-meta"><span className="tag neutral">WireGuard</span>{peer?.persistent_keepalive != null && <span className="tag">Keepalive {peer.persistent_keepalive}s</span>}</div>
                 </div>
               );
@@ -798,11 +816,11 @@ function DetailView({
             return (
               <div className="endpoint-card" key={`${endpoint.kind}-${index}-${endpoint.port}`} onClick={() => void copyEndpoint(address)}>
                 <div className="endpoint-card-top">
-                  <div className="endpoint-kind"><span className="endpoint-kind-icon">{profile.kind === 'Http' ? <Server size={15} /> : <Link2 size={15} />}</span><div><strong>{profile.kind === 'Http' ? 'HTTP 反向代理' : (forward?.tag || 'SSH 本地转发')}</strong><div className="endpoint-state">{stateLabel(profile.state)} · 点击卡片复制</div></div></div>
-                  <button className="icon-button" onClick={(event) => { event.stopPropagation(); void copyEndpoint(address); }} title="复制本地端点">{isCopied ? <Check size={15} color="#219653" /> : <Copy size={15} />}</button>
+                  <div className="endpoint-kind"><span className="endpoint-kind-icon">{profile.kind === 'Http' ? <Server size={15} /> : <Link2 size={15} />}</span><div><strong>{profile.kind === 'Http' ? t('kind.http') : (forward?.tag || t('detail.sshLocalForward'))}</strong><div className="endpoint-state">{stateLabel(profile.state, t)} · {t('detail.clickToCopy')}</div></div></div>
+                  <button className="icon-button" onClick={(event) => { event.stopPropagation(); void copyEndpoint(address); }} title={t('detail.copyEndpoint')}>{isCopied ? <Check size={15} color="#219653" /> : <Copy size={15} />}</button>
                 </div>
                 <div className="copyable-address"><span>{profile.kind === 'Http' ? `http://${address}` : address}</span></div>
-                <div className="endpoint-remote">{profile.kind === 'Http' ? `上游 · ${profile.http?.upstream_url ?? '未配置'}` : `远端目标 · ${formatAddress(forward?.remote_host ?? endpoint.host, forward?.remote_port ?? 0)}`}</div>
+                <div className="endpoint-remote">{profile.kind === 'Http' ? `${t('detail.upstreamPrefix')}${profile.http?.upstream_url ?? t('common.notConfigured')}` : `${t('detail.remoteTargetPrefix')}${formatAddress(forward?.remote_host ?? endpoint.host, forward?.remote_port ?? 0, t)}`}</div>
                 <div className="endpoint-meta"><span className="tag neutral">{endpoint.kind === 'http' ? 'HTTP/1.1' : profile.wstunnel ? 'WebSocket' : 'direct-tcpip'}</span>{forward?.tag && <span className="tag">{forward.tag}</span>}</div>
               </div>
             );
@@ -811,42 +829,42 @@ function DetailView({
       </section>
 
       <section className="surface-card">
-        <div className="section-title"><div className="section-title-left"><span className="section-icon"><Settings size={15} /></span><div><h2>连接配置</h2><p>敏感信息只显示状态，不返回或记录具体值</p></div></div><button className="small-button" onClick={onEdit}><Pencil size={12} />编辑配置</button></div>
+        <div className="section-title"><div className="section-title-left"><span className="section-icon"><Settings size={15} /></span><div><h2>{t('detail.configTitle')}</h2><p>{t('detail.configDesc')}</p></div></div><button className="small-button" onClick={onEdit}><Pencil size={12} />{t('detail.editConfig')}</button></div>
         <div className="key-value-grid">
           {profile.kind === 'Http' && profile.http ? <>
-            <KeyValue label="上游基础 URL" value={profile.http.upstream_url} mono />
-            <KeyValue label="监听端口" value={profile.http.listen_port > 0 ? formatAddress('127.0.0.1', profile.http.listen_port) : '启动后分配'} mono />
-            <KeyValue label="鉴权 Headers" value={`${profile.http.headers.length} 项（值已隐藏）`} />
-            <KeyValue label="鉴权 Cookies" value={`${profile.http.cookies.length} 项（值已隐藏）`} />
-            <KeyValue label="应用 HTTP 代理" value={profile.http.use_system_proxy ? (proxy ? formatAddress(proxy.host, proxy.port) : '未配置') : '未启用'} mono />
+            <KeyValue label={t('detail.upstreamBaseUrl')} value={profile.http.upstream_url} mono />
+            <KeyValue label={t('detail.listenPort')} value={profile.http.listen_port > 0 ? formatAddress('127.0.0.1', profile.http.listen_port, t) : t('detail.assignedAfterStart')} mono />
+            <KeyValue label={t('detail.authHeaders')} value={t('common.itemsHidden', { n: profile.http.headers.length })} />
+            <KeyValue label={t('detail.authCookies')} value={t('common.itemsHidden', { n: profile.http.cookies.length })} />
+            <KeyValue label={t('detail.appHttpProxy')} value={profile.http.use_system_proxy ? (proxy ? formatAddress(proxy.host, proxy.port, t) : t('common.notConfigured')) : t('common.notEnabled')} mono />
           </> : profile.kind === 'WireGuard' && profile.wireguard ? <>
-            <KeyValue label="接口地址" value={profile.wireguard.addresses.join(', ')} mono />
-            <KeyValue label="接口 MTU" value={profile.wireguard.mtu?.toString() ?? '系统默认'} mono />
-            <KeyValue label="监听端口" value={profile.wireguard.listen_port ? profile.wireguard.listen_port.toString() : '随机端口'} mono />
-            <KeyValue label="DNS" value={profile.wireguard.dns.join(', ') || '未修改'} mono />
-            <KeyValue label="对端数量" value={`${profile.wireguard.peers.length} 个`} />
+            <KeyValue label={t('detail.interfaceAddresses')} value={profile.wireguard.addresses.join(', ')} mono />
+            <KeyValue label={t('detail.interfaceMtu')} value={profile.wireguard.mtu?.toString() ?? t('detail.systemDefault')} mono />
+            <KeyValue label={t('detail.listenPort')} value={profile.wireguard.listen_port ? profile.wireguard.listen_port.toString() : t('common.randomPort')} mono />
+            <KeyValue label="DNS" value={profile.wireguard.dns.join(', ') || t('detail.dnsUnchanged')} mono />
+            <KeyValue label={t('detail.peerCount')} value={t('common.countUnit', { n: profile.wireguard.peers.length })} />
           </> : profile.ssh ? <>
-            <KeyValue label="SSH 连接" value={profile.ssh.connection_name} />
-            <KeyValue label="SSH 远端" value={`${profile.ssh.username}@${formatAddress(profile.ssh.host, profile.ssh.port)}`} mono />
-            <KeyValue label="认证方式" value={profile.ssh.auth_mode === 'Password' ? (profile.ssh.password_configured ? '密码（已保存）' : '密码未配置') : '私钥文件'} />
-            <KeyValue label="本地转发" value={`${profile.ssh.forwards.length} 条规则`} />
-            <KeyValue label="应用 SOCKS5 代理" value={profile.ssh.use_system_proxy ? (proxy ? formatAddress(proxy.host, proxy.port) : '未配置') : '未启用'} mono />
+            <KeyValue label={t('detail.sshConnection')} value={profile.ssh.connection_name} />
+            <KeyValue label={t('detail.sshRemote')} value={`${profile.ssh.username}@${formatAddress(profile.ssh.host, profile.ssh.port, t)}`} mono />
+            <KeyValue label={t('detail.authMode')} value={profile.ssh.auth_mode === 'Password' ? (profile.ssh.password_configured ? t('detail.passwordSaved') : t('detail.passwordNotConfigured')) : t('detail.privateKeyFile')} />
+            <KeyValue label={t('detail.localForwards')} value={t('common.rulesCount', { n: profile.ssh.forwards.length })} />
+            <KeyValue label={t('detail.appSocks5Proxy')} value={profile.ssh.use_system_proxy ? (proxy ? formatAddress(proxy.host, proxy.port, t) : t('common.notConfigured')) : t('common.notEnabled')} mono />
           </> : profile.wstunnel ? <>
-            <KeyValue label="Wstunnel 服务端" value={profile.wstunnel.server_url} mono />
-            <KeyValue label="HTTP Upgrade 路径前缀" value={profile.wstunnel.http_upgrade_path_prefix} mono />
-            <KeyValue label="本地转发" value={`${profile.wstunnel.forwards.length} 条规则`} />
-            <KeyValue label="TLS 证书校验" value={profile.wstunnel.tls_verify_certificate ? '已启用' : '未启用（与原命令一致）'} />
+            <KeyValue label={t('detail.wstunnelServer')} value={profile.wstunnel.server_url} mono />
+            <KeyValue label={t('detail.upgradePathPrefix')} value={profile.wstunnel.http_upgrade_path_prefix} mono />
+            <KeyValue label={t('detail.localForwards')} value={t('common.rulesCount', { n: profile.wstunnel.forwards.length })} />
+            <KeyValue label={t('detail.tlsVerify')} value={profile.wstunnel.tls_verify_certificate ? t('common.enabled') : t('detail.tlsOffNote')} />
           </> : null}
         </div>
         {profile.kind === 'WireGuard' && (
           <div className="wg-status-grid">
-            <KeyValue label="实际接口" value={wgStatus?.interface_name ?? '启动后显示'} mono />
-            <KeyValue label="本机公钥" value={wgStatus?.public_key ? `${wgStatus.public_key.slice(0, 12)}…` : '未连接'} mono />
+            <KeyValue label={t('detail.actualInterface')} value={wgStatus?.interface_name ?? t('detail.shownAfterStart')} mono />
+            <KeyValue label={t('detail.localPublicKey')} value={wgStatus?.public_key ? `${wgStatus.public_key.slice(0, 12)}…` : t('common.notConnected')} mono />
             {(wgStatus?.peers ?? []).map((peer) => (
               <KeyValue
                 key={peer.public_key}
-                label={`对端 ${peer.public_key.slice(0, 8)}…`}
-                value={`${peer.endpoint ?? '未连接'} · 接收 ${formatBytes(peer.rx_bytes)} · 发送 ${formatBytes(peer.tx_bytes)} · 握手 ${peer.handshake_age_sec == null ? '未完成' : `${peer.handshake_age_sec} 秒前`}`}
+                label={t('detail.peerKey', { key: peer.public_key.slice(0, 8) })}
+                value={`${peer.endpoint ?? t('common.notConnected')} · ${t('detail.rxLabel')} ${formatBytes(peer.rx_bytes)} · ${t('detail.txLabel')} ${formatBytes(peer.tx_bytes)} · ${t('detail.handshakeLabel')} ${peer.handshake_age_sec == null ? t('detail.handshakeNever') : t('detail.secondsAgo', { n: peer.handshake_age_sec })}`}
                 mono
               />
             ))}
@@ -855,9 +873,9 @@ function DetailView({
       </section>
 
       <section className="surface-card log-card">
-        <div className="section-title"><div className="section-title-left"><span className="section-icon"><List size={15} /></span><div><h2>运行日志</h2><p>来自 Rust Core 的脱敏状态事件</p></div></div><button className="small-button" onClick={onClearLogs}>清空</button></div>
+        <div className="section-title"><div className="section-title-left"><span className="section-icon"><List size={15} /></span><div><h2>{t('detail.logsTitle')}</h2><p>{t('detail.logsDesc')}</p></div></div><button className="small-button" onClick={onClearLogs}>{t('common.clear')}</button></div>
         <div className="log-list">
-          {logs.length === 0 ? <div className="empty-sidebar"><span>暂无运行日志</span></div> : logs.slice(0, 30).map((log) => <div className="log-row" key={log.id}><span className="log-time">{log.time}</span><span className="log-level">{stateLabel(log.state)}</span><span className="log-message" title={log.message}>{log.message}</span></div>)}
+          {logs.length === 0 ? <div className="empty-sidebar"><span>{t('detail.noLogs')}</span></div> : logs.slice(0, 30).map((log) => <div className="log-row" key={log.id}><span className="log-time">{log.time}</span><span className="log-level">{stateLabel(log.state, t)}</span><span className="log-message" title={log.message}>{log.message}</span></div>)}
         </div>
       </section>
       {summary?.error && !profile.error && <div className="field-hint">{summary.error}</div>}
@@ -870,10 +888,11 @@ function KeyValue({ label, value, mono = false }: { label: string; value: string
 }
 
 function RouteBanner({ ssh, proxy }: { ssh: NonNullable<ProfileView['ssh']>; proxy: ProxyEndpoint | null }) {
+  const { t } = useTranslation();
   return (
     <div className="route-banner">
-      <div className="route-banner-header"><Wifi size={15} />SSH 连接链路</div>
-      <div className="route-flow"><span className="route-step"><strong>LocalProxy</strong> 本地端口</span><span className="route-arrow">→</span><span className="route-step"><strong>SOCKS5</strong> {proxy ? formatAddress(proxy.host, proxy.port) : '未配置'}</span><span className="route-arrow">→</span><span className="route-step"><strong>SSH 会话</strong> {ssh.username}@{formatAddress(ssh.host, ssh.port)}</span><span className="route-arrow">→</span><span className="route-step"><strong>目标地址</strong> SSH direct-tcpip</span></div>
+      <div className="route-banner-header"><Wifi size={15} />{t('route.title')}</div>
+      <div className="route-flow"><span className="route-step"><strong>LocalProxy</strong> {t('route.localPort')}</span><span className="route-arrow">→</span><span className="route-step"><strong>SOCKS5</strong> {proxy ? formatAddress(proxy.host, proxy.port, t) : t('common.notConfigured')}</span><span className="route-arrow">→</span><span className="route-step"><strong>{t('route.sshSession')}</strong> {ssh.username}@{formatAddress(ssh.host, ssh.port, t)}</span><span className="route-arrow">→</span><span className="route-step"><strong>{t('route.target')}</strong> SSH direct-tcpip</span></div>
     </div>
   );
 }
@@ -892,13 +911,14 @@ function ToastStack({ toasts, onDismiss }: { toasts: Toast[]; onDismiss: (id: nu
 }
 
 function TypePickerModal({ onClose, onChoose }: { onClose: () => void; onChoose: (kind: ProxyKind) => void }) {
-  const options: Array<{ kind: ProxyKind; title: string; hint: string; icon: JSX.Element }> = [
-    { kind: 'WireGuard', title: 'WireGuard 隧道', hint: 'wg-quick 导入 · utun · 路由和 DNS', icon: <ShieldCheck size={20} /> },
-    { kind: 'Wstunnel', title: 'Wstunnel 隧道', hint: 'UDP / TCP over WebSocket', icon: <Link2 size={20} /> },
-    { kind: 'Http', title: 'HTTP 反向代理', hint: '上游替换与 Header / Cookie 注入', icon: <Globe size={20} /> },
-    { kind: 'Ssh', title: 'SSH 端口转发', hint: '本地端口 → SSH 远端', icon: <Terminal size={20} /> },
+  const { t } = useTranslation();
+  const options: Array<{ kind: ProxyKind; hint: string; icon: JSX.Element }> = [
+    { kind: 'WireGuard', hint: t('typePicker.wgHint'), icon: <ShieldCheck size={20} /> },
+    { kind: 'Wstunnel', hint: t('typePicker.wstunnelHint'), icon: <Link2 size={20} /> },
+    { kind: 'Http', hint: t('typePicker.httpHint'), icon: <Globe size={20} /> },
+    { kind: 'Ssh', hint: t('typePicker.sshHint'), icon: <Terminal size={20} /> },
   ];
-  return <div className="modal-backdrop"><div className="dialog type-picker-dialog" role="dialog" aria-modal="true"><div className="modal-heading"><div><h2>选择代理类型</h2><p>不同类型的配置卡片相互独立</p></div><button className="icon-button" onClick={onClose}><X size={18} /></button></div><div className="dialog-scroll type-grid">{options.map((option) => <button key={option.kind} className="type-card" onClick={() => onChoose(option.kind)}>{option.icon}<strong>{option.title}</strong><span>{option.hint}</span></button>)}</div></div></div>;
+  return <div className="modal-backdrop"><div className="dialog type-picker-dialog" role="dialog" aria-modal="true"><div className="modal-heading"><div><h2>{t('typePicker.title')}</h2><p>{t('typePicker.desc')}</p></div><button className="icon-button" onClick={onClose}><X size={18} /></button></div><div className="dialog-scroll type-grid">{options.map((option) => <button key={option.kind} className="type-card" onClick={() => onChoose(option.kind)}>{option.icon}<strong>{kindLabel(option.kind, t)}</strong><span>{option.hint}</span></button>)}</div></div></div>;
 }
 
 function ProfileEditor({
@@ -916,6 +936,7 @@ function ProfileEditor({
   onSave: (draft: ProfileDraft) => Promise<void>;
   onNotify: (message: string, tone?: Toast['tone']) => void;
 }) {
+  const { t } = useTranslation();
   const initialHttp = initial?.http;
   const initialSsh = initial?.ssh;
   const initialWireGuard = initial?.wireguard;
@@ -942,25 +963,25 @@ function ProfileEditor({
   const [wgConfigText, setWgConfigText] = useState('');
   const importWstunnel = async () => {
     const api = bridge();
-    if (!api) return setFormError('请在 Electron 桌面端导入命令');
+    if (!api) return setFormError(t('editor.importNeedDesktop'));
     setImporting(true); setFormError(null);
     try {
       const config = await api.request<WstunnelConfig>('parse_wstunnel_command', { command: importCommand });
       setWsConfig(config);
-      if (!name.trim()) setName(`Wstunnel ${new URL(config.server_url).hostname}`);
+      if (!name.trim()) setName(t('editor.defaultWstunnelName', { host: new URL(config.server_url).hostname }));
       setImportCommand('');
     } catch (error) { setFormError(String(error)); } finally { setImporting(false); }
   };
   const importWireGuardConfig = async () => {
     const api = bridge();
-    if (!api) return setFormError('请在 Electron 桌面端导入配置');
+    if (!api) return setFormError(t('editor.importWgNeedDesktop'));
     setImporting(true); setFormError(null);
     try {
       const config = await api.request<WireGuardConfig>('parse_wg_config', { config: wgConfigText });
       setWgConfig(config);
-      if (!name.trim()) setName('WireGuard 隧道');
+      if (!name.trim()) setName(t('editor.defaultWgName'));
       setWgConfigText('');
-      onNotify('已导入 wg-quick 配置', 'success');
+      onNotify(t('editor.wgImported'), 'success');
     } catch (error) {
       setFormError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -987,7 +1008,7 @@ function ProfileEditor({
     event.preventDefault();
     setFormError(null);
     const trimmedName = name.trim();
-    if (!trimmedName) return setFormError('请填写代理名称');
+    if (!trimmedName) return setFormError(t('editor.nameRequired'));
     if (kind === 'Wstunnel') {
       setSaving(true);
       try { await onSave({ id: initial?.id ?? null, name: trimmedName, tags: tags.split(/[\n,]/).map(t => t.trim()).filter(Boolean), kind, http: null, ssh: null, wstunnel: wsConfig }); }
@@ -995,9 +1016,9 @@ function ProfileEditor({
       return;
     }
     if (kind === 'WireGuard') {
-      if (wgConfig.addresses.length === 0) return setFormError('请导入或填写接口 Address');
-      if (!wgConfig.private_key.value && wgConfig.private_key.kind !== 'Keep') return setFormError('请填写 PrivateKey');
-      if (wgConfig.peers.length === 0) return setFormError('至少需要一个 [Peer]');
+      if (wgConfig.addresses.length === 0) return setFormError(t('editor.wgAddressRequired'));
+      if (!wgConfig.private_key.value && wgConfig.private_key.kind !== 'Keep') return setFormError(t('editor.wgKeyRequired'));
+      if (wgConfig.peers.length === 0) return setFormError(t('editor.wgPeerRequired'));
       setSaving(true);
       try {
         await onSave({
@@ -1016,9 +1037,9 @@ function ProfileEditor({
       return;
     }
     if (kind === 'Http') {
-      if (!upstreamUrl.trim()) return setFormError('请填写上游基础 URL');
-      const headerResult = buildSecretPatches(headers, removedHeaders, 'Header');
-      const cookieResult = buildSecretPatches(cookies, removedCookies, 'Cookie');
+      if (!upstreamUrl.trim()) return setFormError(t('editor.upstreamRequired'));
+      const headerResult = buildSecretPatches(headers, removedHeaders, 'Header', t);
+      const cookieResult = buildSecretPatches(cookies, removedCookies, 'Cookie', t);
       if (headerResult.error || cookieResult.error) return setFormError(headerResult.error || cookieResult.error);
       const draft: ProfileDraft = {
         id: initial?.id ?? null,
@@ -1039,13 +1060,14 @@ function ProfileEditor({
       return;
     }
 
-    if (!sshConnectionId) return setFormError('请先选择 SSH 连接');
+    if (!sshConnectionId) return setFormError(t('editor.sshConnectionRequired'));
+    if (!sshConnectionId) return setFormError(t('editor.sshConnectionRequired'));
     const forwards: ForwardDraft[] = [];
     for (const row of forwardRows) {
       const hasAnyValue = row.remote_host.trim() || row.remote_port > 0 || row.local_port > 0 || row.tag.trim();
       if (!hasAnyValue) continue;
-      if (!row.remote_host.trim()) return setFormError('每条 SSH 转发规则都需要远端主机');
-      if (row.remote_port <= 0) return setFormError(`转发规则 ${row.remote_host} 的远端端口必须大于 0`);
+      if (!row.remote_host.trim()) return setFormError(t('editor.forwardRemoteRequired'));
+      if (row.remote_port <= 0) return setFormError(t('editor.forwardPortInvalid', { host: row.remote_host }));
       forwards.push({ local_port: row.local_port, remote_host: row.remote_host.trim(), remote_port: row.remote_port, tag: row.tag.trim() });
     }
     const draft: ProfileDraft = {
@@ -1063,64 +1085,66 @@ function ProfileEditor({
     try { await onSave(draft); } catch { /* the parent presents the error toast */ } finally { setSaving(false); }
   };
 
+  const kindText = t(`kind.${kind.toLowerCase()}`);
+
   return (
     <div className="modal-backdrop">
       <div className="dialog" role="dialog" aria-modal="true" aria-labelledby="profile-editor-title">
         <div className="modal-heading">
-          <div><h2 id="profile-editor-title">{initial ? `编辑${kindLabel(kind)}` : `新建${kindLabel(kind)}`}</h2><p>每种代理类型使用独立配置卡片</p></div>
-          <button className="icon-button" onClick={onClose} title="关闭"><X size={18} /></button>
+          <div><h2 id="profile-editor-title">{initial ? t('editor.editTitle', { kind: kindText }) : t('editor.newTitle', { kind: kindText })}</h2><p>{t('editor.desc')}</p></div>
+          <button className="icon-button" onClick={onClose} title={t('common.close')}><X size={18} /></button>
         </div>
         <form onSubmit={handleSubmit}>
           <div className="dialog-scroll">
             {kind === 'Wstunnel' && (
               <section className="form-section">
-                <div className="form-section-title"><h3>从命令快速导入</h3><span>粘贴 wstunnel client 命令，解析后可编辑并保存</span></div>
-                <div className="form-field"><textarea aria-label="Wstunnel 命令" className="mono-input" rows={3} value={importCommand} onChange={e => setImportCommand(e.target.value)} placeholder={"wstunnel client --http-upgrade-path-prefix XXXX -L 'udp://50814:localhost:50814?timeout_sec=0' wss://18.123.135.89:443"} /></div>
-                <button type="button" className="small-button" disabled={importing || !importCommand.trim()} onClick={() => void importWstunnel()}>{importing ? '解析中…' : '解析并填入配置'}</button>
+                <div className="form-section-title"><h3>{t('editor.quickImportTitle')}</h3><span>{t('editor.quickImportDesc')}</span></div>
+                <div className="form-field"><textarea aria-label="wstunnel client" className="mono-input" rows={3} value={importCommand} onChange={e => setImportCommand(e.target.value)} placeholder={"wstunnel client --http-upgrade-path-prefix XXXX -L 'udp://50814:localhost:50814?timeout_sec=0' wss://18.123.135.89:443"} /></div>
+                <button type="button" className="small-button" disabled={importing || !importCommand.trim()} onClick={() => void importWstunnel()}>{importing ? t('editor.parsing') : t('editor.parseAndFill')}</button>
               </section>
             )}
             <section className="form-section">
-              <div className="form-section-title"><h3>基本信息</h3><span>可用标签帮助快速定位配置</span></div>
+              <div className="form-section-title"><h3>{t('editor.basicInfo')}</h3><span>{t('editor.basicInfoDesc')}</span></div>
               <div className="form-grid">
-                <div className="form-field"><label>代理名称</label><input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：生产 SSH 隧道" autoFocus /></div>
-                <div className="form-field"><label>Tag <span>可选，逗号分隔</span></label><input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="production, mysql" /></div>
+                <div className="form-field"><label>{t('editor.nameLabel')}</label><input value={name} onChange={(event) => setName(event.target.value)} placeholder={t('editor.namePlaceholder')} autoFocus /></div>
+                <div className="form-field"><label>Tag <span>{t('editor.tagOptional')}</span></label><input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="production, mysql" /></div>
               </div>
             </section>
 
             {kind === 'WireGuard' ? (
               <section className="form-section">
-                <div className="form-section-title"><h3>从 wg-quick 快速导入</h3><span>粘贴 [Interface] / [Peer] 配置，私钥只写入本地私密文件</span></div>
-                <div className="form-field"><textarea aria-label="WireGuard 配置" className="mono-input" rows={10} value={wgConfigText} onChange={e => setWgConfigText(e.target.value)} placeholder={"[Interface]\nPrivateKey = ...\nAddress = 192.168.1.6/32\nMTU = 1420\nDNS = 223.5.5.5\n\n[Peer]\nPublicKey = ...\nEndpoint = localhost:50814\nAllowedIPs = 172.16.110.0/24,172.31.0.2/32\nPersistentKeepalive = 25"} /></div>
-                <button type="button" className="primary-button" disabled={importing || !wgConfigText.trim()} onClick={() => void importWireGuardConfig()}>{importing ? '导入中…' : '解析并导入'}</button>
+                <div className="form-section-title"><h3>{t('editor.wgImportTitle')}</h3><span>{t('editor.wgImportDesc')}</span></div>
+                <div className="form-field"><textarea aria-label="wg-quick" className="mono-input" rows={10} value={wgConfigText} onChange={e => setWgConfigText(e.target.value)} placeholder={"[Interface]\nPrivateKey = ...\nAddress = 192.168.1.6/32\nMTU = 1420\nDNS = 223.5.5.5\n\n[Peer]\nPublicKey = ...\nEndpoint = localhost:50814\nAllowedIPs = 172.16.110.0/24,172.31.0.2/32\nPersistentKeepalive = 25"} /></div>
+                <button type="button" className="primary-button" disabled={importing || !wgConfigText.trim()} onClick={() => void importWireGuardConfig()}>{importing ? t('editor.importing') : t('editor.parseAndImport')}</button>
               </section>
             ) : kind === 'Wstunnel' ? (
               <section className="form-section wstunnel-section">
-                <div className="form-section-title"><h3>Wstunnel 隧道</h3><span>内置 Rust 客户端 · UDP / TCP over WebSocket</span></div>
+                <div className="form-section-title"><h3>{t('editor.wstunnelTitle')}</h3><span>{t('editor.wstunnelDesc')}</span></div>
                 <div className="form-grid wstunnel-server-grid">
-                  <div className="form-field"><label>服务端 URL</label><input aria-label="Wstunnel 服务端" className="mono-input" value={wsConfig.server_url} onChange={e => setWsConfig({...wsConfig, server_url: e.target.value})} placeholder="wss://example.com:443" /></div>
-                  <div className="form-field"><label>HTTP Upgrade 路径前缀</label><input aria-label="Upgrade 路径前缀" className="mono-input" value={wsConfig.http_upgrade_path_prefix} onChange={e => setWsConfig({...wsConfig, http_upgrade_path_prefix: e.target.value})} /></div>
+                  <div className="form-field"><label>{t('editor.serverUrl')}</label><input aria-label={t('detail.wstunnelServer')} className="mono-input" value={wsConfig.server_url} onChange={e => setWsConfig({...wsConfig, server_url: e.target.value})} placeholder="wss://example.com:443" /></div>
+                  <div className="form-field"><label>{t('detail.upgradePathPrefix')}</label><input aria-label={t('detail.upgradePathPrefix')} className="mono-input" value={wsConfig.http_upgrade_path_prefix} onChange={e => setWsConfig({...wsConfig, http_upgrade_path_prefix: e.target.value})} /></div>
                 </div>
                 <label className="wstunnel-tls-option">
                   <input type="checkbox" checked={wsConfig.tls_verify_certificate} onChange={e => setWsConfig({...wsConfig, tls_verify_certificate: e.target.checked})} />
                   <span className="wstunnel-checkbox"><Check size={12} /></span>
-                  <span className="wstunnel-tls-copy"><strong>校验 TLS 证书</strong><small>启用 wss 时校验服务端证书；导入命令时保留原选项。</small></span>
+                  <span className="wstunnel-tls-copy"><strong>{t('editor.tlsVerifyLabel')}</strong><small>{t('editor.tlsVerifyHint')}</small></span>
                 </label>
                 <div className="wstunnel-forwarding">
                   <div className="wstunnel-forwarding-header">
-                    <div><strong>转发规则</strong><span>{wsConfig.forwards.length > 0 ? `已配置 ${wsConfig.forwards.length} 条规则` : '将本地端口转发到远端服务'}</span></div>
-                    {wsConfig.forwards.length > 0 && <button type="button" className="add-row-button wstunnel-add-button" onClick={() => setWsConfig({...wsConfig, forwards: [...wsConfig.forwards, {protocol: 'udp', local_port: 50814, remote_host: 'localhost', remote_port: 50814, timeout_sec: 0}]})}><Plus size={13} />添加规则</button>}
+                    <div><strong>{t('editor.forwardsTitle')}</strong><span>{wsConfig.forwards.length > 0 ? t('editor.forwardsConfigured', { n: wsConfig.forwards.length }) : t('editor.forwardsHint')}</span></div>
+                    {wsConfig.forwards.length > 0 && <button type="button" className="add-row-button wstunnel-add-button" onClick={() => setWsConfig({...wsConfig, forwards: [...wsConfig.forwards, {protocol: 'udp', local_port: 50814, remote_host: 'localhost', remote_port: 50814, timeout_sec: 0}]})}><Plus size={13} />{t('editor.addRule')}</button>}
                   </div>
-                  {wsConfig.forwards.length === 0 && <div className="wstunnel-empty-rules"><div><strong>暂无转发规则</strong><span>添加 UDP 或 TCP 规则后即可启动隧道</span></div><button type="button" className="small-button" onClick={() => setWsConfig({...wsConfig, forwards: [...wsConfig.forwards, {protocol: 'udp', local_port: 50814, remote_host: 'localhost', remote_port: 50814, timeout_sec: 0}]})}><Plus size={14} />添加转发规则</button></div>}
+                  {wsConfig.forwards.length === 0 && <div className="wstunnel-empty-rules"><div><strong>{t('editor.noForwards')}</strong><span>{t('editor.noForwardsHint')}</span></div><button type="button" className="small-button" onClick={() => setWsConfig({...wsConfig, forwards: [...wsConfig.forwards, {protocol: 'udp', local_port: 50814, remote_host: 'localhost', remote_port: 50814, timeout_sec: 0}]})}><Plus size={14} />{t('editor.addForwardRule')}</button></div>}
                   {wsConfig.forwards.map((f, index) => {
                     const update = (patch: Partial<typeof f>) => setWsConfig({...wsConfig, forwards: wsConfig.forwards.map((row, i) => i === index ? {...row, ...patch} : row)});
                     return <div className="wstunnel-forward-card" key={index}>
-                      <div className="wstunnel-forward-card-header"><strong>规则 {index + 1}</strong><button type="button" className="remove-row" onClick={() => setWsConfig({...wsConfig, forwards: wsConfig.forwards.filter((_, i) => i !== index)})} title="删除规则"><Trash2 size={14} /></button></div>
+                      <div className="wstunnel-forward-card-header"><strong>{t('common.ruleIndex', { n: index + 1 })}</strong><button type="button" className="remove-row" onClick={() => setWsConfig({...wsConfig, forwards: wsConfig.forwards.filter((_, i) => i !== index)})} title={t('editor.deleteRule')}><Trash2 size={14} /></button></div>
                       <div className="wstunnel-forward-grid">
-                        <div className="form-field"><label>协议</label><select value={f.protocol} onChange={e => update({protocol: e.target.value, timeout_sec: null})}><option value="udp">UDP</option><option value="tcp">TCP</option></select></div>
-                        <div className="form-field"><label>本地端口</label><input className="mono-input" type="number" min="1" max="65535" value={f.local_port} onChange={e => update({local_port: Number(e.target.value)})} /></div>
-                        <div className="form-field"><label>远端主机</label><input className="mono-input" value={f.remote_host} onChange={e => update({remote_host: e.target.value})} placeholder="localhost" /></div>
-                        <div className="form-field"><label>远端端口</label><input className="mono-input" type="number" min="1" max="65535" value={f.remote_port} onChange={e => update({remote_port: Number(e.target.value)})} /></div>
-                        {f.protocol === 'udp' && <div className="form-field"><label>UDP 超时 <span>秒</span></label><input className="mono-input" type="number" min="0" max="4294967295" placeholder="30" value={f.timeout_sec ?? ''} onChange={e => update({timeout_sec: e.target.value === '' ? null : Number(e.target.value)})} /><div className="field-hint">0 表示永不超时</div></div>}
+                        <div className="form-field"><label>{t('common.protocol')}</label><select value={f.protocol} onChange={e => update({protocol: e.target.value, timeout_sec: null})}><option value="udp">UDP</option><option value="tcp">TCP</option></select></div>
+                        <div className="form-field"><label>{t('common.localPort')}</label><input className="mono-input" type="number" min="1" max="65535" value={f.local_port} onChange={e => update({local_port: Number(e.target.value)})} /></div>
+                        <div className="form-field"><label>{t('common.remoteHost')}</label><input className="mono-input" value={f.remote_host} onChange={e => update({remote_host: e.target.value})} placeholder="localhost" /></div>
+                        <div className="form-field"><label>{t('common.remotePort')}</label><input className="mono-input" type="number" min="1" max="65535" value={f.remote_port} onChange={e => update({remote_port: Number(e.target.value)})} /></div>
+                        {f.protocol === 'udp' && <div className="form-field"><label>{t('editor.udpTimeout')} <span>s</span></label><input className="mono-input" type="number" min="0" max="4294967295" placeholder="30" value={f.timeout_sec ?? ''} onChange={e => update({timeout_sec: e.target.value === '' ? null : Number(e.target.value)})} /><div className="field-hint">{t('editor.udpTimeoutHint')}</div></div>}
                       </div>
                     </div>;
                   })}
@@ -1128,28 +1152,28 @@ function ProfileEditor({
               </section>
             ) : kind === 'Http' ? (
               <section className="form-section">
-                <div className="form-section-title"><h3>HTTP 转发</h3><span>支持 HTTP/HTTPS 上游与流式请求体</span></div>
+                <div className="form-section-title"><h3>{t('editor.httpTitle')}</h3><span>{t('editor.httpDesc')}</span></div>
                 <div className="form-grid">
-                  <div className="form-field"><label>本地监听端口</label><input className="mono-input" type="number" min="0" max="65535" value={listenPort} onChange={(event) => setListenPort(Number(event.target.value))} /><div className="field-hint">填写 0 由系统分配随机空闲端口</div></div>
-                  <div className="form-field"><label>上游基础 URL</label><input className="mono-input" value={upstreamUrl} onChange={(event) => setUpstreamUrl(event.target.value)} placeholder="https://service.example.com" /><div className="field-hint">本地路径和 query 会追加到上游地址</div></div>
+                  <div className="form-field"><label>{t('common.localPort')}</label><input className="mono-input" type="number" min="0" max="65535" value={listenPort} onChange={(event) => setListenPort(Number(event.target.value))} /><div className="field-hint">{t('editor.listenPortHint')}</div></div>
+                  <div className="form-field"><label>{t('detail.upstreamBaseUrl')}</label><input className="mono-input" value={upstreamUrl} onChange={(event) => setUpstreamUrl(event.target.value)} placeholder="https://service.example.com" /><div className="field-hint">{t('editor.upstreamUrlHint')}</div></div>
                 </div>
-                <div className="proxy-toggle-card"><div className="switch-row"><div className="switch-copy"><Globe size={16} /><div><strong>经过应用级 HTTP 代理</strong><span>{settings.http_proxy ? `当前代理：${formatAddress(settings.http_proxy.host, settings.http_proxy.port)}` : '请先在应用设置中配置 HTTP 代理'}</span></div></div><label className="switch"><input type="checkbox" checked={httpUseProxy} onChange={(event) => setHttpUseProxy(event.target.checked)} /><span /></label></div></div>
-                <SecretEditor title="Headers" hint="值只写入本地私密文件；客户端同名 header 会被覆盖" rows={headers} setRows={setHeaders} removed={removedHeaders} setRemoved={setRemovedHeaders} label="Header" onNotify={onNotify} />
-                <SecretEditor title="Cookies" hint="按 cookie 名称合并，客户端同名 cookie 会被覆盖" rows={cookies} setRows={setCookies} removed={removedCookies} setRemoved={setRemovedCookies} label="Cookie" onNotify={onNotify} />
+                <div className="proxy-toggle-card"><div className="switch-row"><div className="switch-copy"><Globe size={16} /><div><strong>{t('editor.useAppProxy')}</strong><span>{settings.http_proxy ? t('editor.currentProxy', { address: formatAddress(settings.http_proxy.host, settings.http_proxy.port, t) }) : t('editor.configureProxyFirst')}</span></div></div><label className="switch"><input type="checkbox" checked={httpUseProxy} onChange={(event) => setHttpUseProxy(event.target.checked)} /><span /></label></div></div>
+                <SecretEditor title="Headers" hint={t('secrets.headersHint')} rows={headers} setRows={setHeaders} removed={removedHeaders} setRemoved={setRemovedHeaders} label="Header" onNotify={onNotify} />
+                <SecretEditor title="Cookies" hint={t('secrets.cookiesHint')} rows={cookies} setRows={setCookies} removed={removedCookies} setRemoved={setRemovedCookies} label="Cookie" onNotify={onNotify} />
               </section>
             ) : (
               <section className="form-section">
-                <div className="form-section-title"><h3>SSH 端口转发</h3><span>选择应用级 SSH 连接，这里只管理转发规则</span></div>
-                {settings.ssh_connections.length === 0 ? <div className="ssh-connection-empty"><Terminal size={18} /><div><strong>还没有 SSH 连接</strong><span>请先到“应用设置 → SSH 连接”中添加连接。</span></div></div> : <>
-                  <div className="form-field"><label>使用 SSH 连接</label><select value={sshConnectionId} onChange={(event) => setSshConnectionId(event.target.value)}>{settings.ssh_connections.map((connection) => <option value={connection.id} key={connection.id}>{connection.name} · {connection.username}@{formatAddress(connection.host, connection.port)}</option>)}</select></div>
-                  {selectedSshConnection && <div className="selected-ssh-connection"><Terminal size={16} /><div><strong>{selectedSshConnection.name}</strong><span>{selectedSshConnection.auth_mode === 'Password' ? '密码认证' : '私钥认证'} · {selectedSshConnection.use_system_proxy ? '经应用 SOCKS5' : '直连'}</span></div></div>}
+                <div className="form-section-title"><h3>{t('editor.sshTitle')}</h3><span>{t('editor.sshDesc')}</span></div>
+                {settings.ssh_connections.length === 0 ? <div className="ssh-connection-empty"><Terminal size={18} /><div><strong>{t('editor.noSshConnections')}</strong><span>{t('editor.noSshConnectionsHint')}</span></div></div> : <>
+                  <div className="form-field"><label>{t('editor.useSshConnection')}</label><select value={sshConnectionId} onChange={(event) => setSshConnectionId(event.target.value)}>{settings.ssh_connections.map((connection) => <option value={connection.id} key={connection.id}>{connection.name} · {connection.username}@{formatAddress(connection.host, connection.port, t)}</option>)}</select></div>
+                  {selectedSshConnection && <div className="selected-ssh-connection"><Terminal size={16} /><div><strong>{selectedSshConnection.name}</strong><span>{selectedSshConnection.auth_mode === 'Password' ? t('editor.passwordAuth') : t('editor.keyAuth')} · {selectedSshConnection.use_system_proxy ? t('editor.viaSocks5') : t('editor.direct')}</span></div></div>}
                 </>}
                 <ForwardEditor rows={forwardRows} setRows={setForwardRows} />
               </section>
             )}
             {formError && <div className="error-banner"><AlertCircle size={16} /><span>{formError}</span></div>}
           </div>
-          <div className="modal-footer"><button type="button" className="outline-button" onClick={onClose}>取消</button><button type="submit" className="primary-button" disabled={saving}>{saving ? <RefreshCw size={14} className="spinner" /> : <Save size={14} />}{saving ? '保存中…' : '保存配置'}</button></div>
+          <div className="modal-footer"><button type="button" className="outline-button" onClick={onClose}>{t('common.cancel')}</button><button type="submit" className="primary-button" disabled={saving}>{saving ? <RefreshCw size={14} className="spinner" /> : <Save size={14} />}{saving ? t('common.saving') : t('editor.save')}</button></div>
         </form>
       </div>
     </div>
@@ -1175,6 +1199,7 @@ function SecretEditor({
   label: string;
   onNotify: (message: string, tone?: Toast['tone']) => void;
 }) {
+  const { t } = useTranslation();
   const [batchOpen, setBatchOpen] = useState(false);
   const [batchText, setBatchText] = useState('');
   const addRow = () => setRows((current) => [...current, { id: `${label}-${Date.now()}-${current.length}`, name: '', value: '', configured: false }]);
@@ -1184,7 +1209,7 @@ function SecretEditor({
   };
   const applyBatch = () => {
     const pairs = parseBatchPairs(batchText);
-    if (pairs.length === 0) return onNotify('没有识别到可用的 name/value 内容', 'error');
+    if (pairs.length === 0) return onNotify(t('secrets.batchNoPairs'), 'error');
     setRows((current) => {
       const next = [...current];
       for (const pair of pairs) {
@@ -1201,16 +1226,17 @@ function SecretEditor({
     });
     setBatchText('');
     setBatchOpen(false);
-    onNotify(`已解析 ${pairs.length} 个${label}`, 'success');
+    onNotify(t('secrets.batchParsed', { n: pairs.length, label }), 'success');
   };
-  return <div className="secret-section"><div className="secret-heading"><div><strong>{title}</strong><span className="configured-badge"><Check size={11} />{rows.filter((row) => row.configured).length} 项已保存</span></div><span>{hint}</span></div>{rows.length === 0 && <div className="field-hint">暂无配置项</div>}{rows.map((row) => <div className="secret-row" key={row.id}><input value={row.name} onChange={(event) => setRows((current) => current.map((item) => item.id === row.id ? { ...item, name: event.target.value } : item))} placeholder={`${label}名称`} /><input value={row.value} onChange={(event) => setRows((current) => current.map((item) => item.id === row.id ? { ...item, value: event.target.value } : item))} placeholder={row.configured ? '已保存，留空保持' : `${label}值`} type={label === 'Cookie' || label === 'Header' ? 'text' : 'text'} /><button type="button" className="remove-row" onClick={() => removeRow(row)} title="移除"><Trash2 size={14} /></button></div>)}<button type="button" className="add-row-button" onClick={addRow}><Plus size={13} />添加{label}</button><button type="button" className="batch-toggle" onClick={() => setBatchOpen((open) => !open)}>{batchOpen ? '收起批量解析' : '批量粘贴解析'}</button>{batchOpen && <div className="batch-box"><label className="batch-label">粘贴格式：name: value，或浏览器复制的“名称 / 值”交替文本</label><textarea value={batchText} onChange={(event) => setBatchText(event.target.value)} placeholder={'sec-fetch-dest\nscript\nsec-fetch-mode\nno-cors'} /><div className="batch-actions"><button type="button" className="small-button" onClick={applyBatch}><Clipboard size={12} />解析并添加</button></div></div>}</div>;
+  return <div className="secret-section"><div className="secret-heading"><div><strong>{title}</strong><span className="configured-badge"><Check size={11} />{t('common.savedCount', { n: rows.filter((row) => row.configured).length })}</span></div><span>{hint}</span></div>{rows.length === 0 && <div className="field-hint">{t('secrets.noItems')}</div>}{rows.map((row) => <div className="secret-row" key={row.id}><input value={row.name} onChange={(event) => setRows((current) => current.map((item) => item.id === row.id ? { ...item, name: event.target.value } : item))} placeholder={t('secrets.namePlaceholder', { label })} /><input value={row.value} onChange={(event) => setRows((current) => current.map((item) => item.id === row.id ? { ...item, value: event.target.value } : item))} placeholder={row.configured ? t('secrets.valuePlaceholderKept') : t('secrets.valuePlaceholder', { label })} type="text" /><button type="button" className="remove-row" onClick={() => removeRow(row)} title={t('common.remove')}><Trash2 size={14} /></button></div>)}<button type="button" className="add-row-button" onClick={addRow}><Plus size={13} />{t('secrets.addLabel', { label })}</button><button type="button" className="batch-toggle" onClick={() => setBatchOpen((open) => !open)}>{batchOpen ? t('secrets.batchCollapse') : t('secrets.batchExpand')}</button>{batchOpen && <div className="batch-box"><label className="batch-label">{t('secrets.batchHint')}</label><textarea value={batchText} onChange={(event) => setBatchText(event.target.value)} placeholder={'sec-fetch-dest\nscript\nsec-fetch-mode\nno-cors'} /><div className="batch-actions"><button type="button" className="small-button" onClick={applyBatch}><Clipboard size={12} />{t('secrets.parseAndAdd')}</button></div></div>}</div>;
 }
 
 function ForwardEditor({ rows, setRows }: { rows: ForwardRowState[]; setRows: Dispatch<SetStateAction<ForwardRowState[]>> }) {
+  const { t } = useTranslation();
   const addRow = () => setRows((current) => [...current, { ...DEFAULT_FORWARD, id: `forward-${Date.now()}-${current.length}` }]);
   const removeRow = (id: string) => setRows((current) => current.filter((row) => row.id !== id));
   const update = (id: string, field: keyof ForwardDraft, value: string | number) => setRows((current) => current.map((row) => row.id === id ? { ...row, [field]: value } : row));
-  return <div className="secret-section"><div className="secret-heading"><strong>本地端口转发规则</strong><span>远端主机支持域名、IPv4 和 IPv6</span></div><div className="forward-header"><span>本地端口</span><span>远端主机</span><span>远端端口</span><span>Tag</span><span /></div>{rows.length === 0 && <div className="field-hint">暂无规则；启动 SSH 前至少添加一条转发规则</div>}{rows.map((row) => <div className="forward-row" key={row.id}><input className="mono-input" type="number" min="0" max="65535" value={row.local_port} onChange={(event) => update(row.id, 'local_port', Number(event.target.value))} placeholder="0=随机" /><input className="mono-input" value={row.remote_host} onChange={(event) => update(row.id, 'remote_host', event.target.value)} placeholder="db.internal.example" /><input className="mono-input" type="number" min="1" max="65535" value={row.remote_port} onChange={(event) => update(row.id, 'remote_port', Number(event.target.value))} placeholder="3306" /><input value={row.tag} onChange={(event) => update(row.id, 'tag', event.target.value)} placeholder="mysql-prod" /><button type="button" className="remove-row" onClick={() => removeRow(row.id)} title="移除规则"><Trash2 size={14} /></button></div>)}<button type="button" className="add-row-button" onClick={addRow}><Plus size={13} />添加转发规则</button></div>;
+  return <div className="secret-section"><div className="secret-heading"><strong>{t('forwards.title')}</strong><span>{t('forwards.desc')}</span></div><div className="forward-header"><span>{t('common.localPort')}</span><span>{t('common.remoteHost')}</span><span>{t('common.remotePort')}</span><span>{t('common.tag')}</span><span /></div>{rows.length === 0 && <div className="field-hint">{t('forwards.noRules')}</div>}{rows.map((row) => <div className="forward-row" key={row.id}><input className="mono-input" type="number" min="0" max="65535" value={row.local_port} onChange={(event) => update(row.id, 'local_port', Number(event.target.value))} placeholder={t('forwards.localPortPlaceholder')} /><input className="mono-input" value={row.remote_host} onChange={(event) => update(row.id, 'remote_host', event.target.value)} placeholder="db.internal.example" /><input className="mono-input" type="number" min="1" max="65535" value={row.remote_port} onChange={(event) => update(row.id, 'remote_port', Number(event.target.value))} placeholder="3306" /><input value={row.tag} onChange={(event) => update(row.id, 'tag', event.target.value)} placeholder="mysql-prod" /><button type="button" className="remove-row" onClick={() => removeRow(row.id)} title={t('forwards.removeRule')}><Trash2 size={14} /></button></div>)}<button type="button" className="add-row-button" onClick={addRow}><Plus size={13} />{t('forwards.addRule')}</button></div>;
 }
 
 function SettingsModal({
@@ -1226,6 +1252,8 @@ function SettingsModal({
   request: <T>(method: string, params?: unknown) => Promise<T>;
   onNotify: (message: string, tone?: Toast['tone']) => void;
 }) {
+  const { t, i18n } = useTranslation();
+  const currentLanguage = LANGUAGES.find((language) => i18n.language.startsWith(language.code))?.code ?? 'en';
   const [httpEnabled, setHttpEnabled] = useState(initial.http_proxy !== null);
   const [socksEnabled, setSocksEnabled] = useState(initial.socks_proxy !== null);
   const [httpHost, setHttpHost] = useState(initial.http_proxy?.host ?? '127.0.0.1');
@@ -1261,19 +1289,19 @@ function SettingsModal({
   const removeSshConnection = (editorKey: string) => setSshConnections((current) => current.filter((connection) => connection.editorKey !== editorKey));
   const chooseSshPrivateKey = async (editorKey: string) => {
     const currentBridge = bridge();
-    if (!currentBridge) return onNotify('请通过 Electron 桌面端选择私钥文件', 'error');
+    if (!currentBridge) return onNotify(t('settings.pickKeyNeedDesktop'), 'error');
     const path = await currentBridge.choosePrivateKey();
     if (path) updateSshConnection(editorKey, { private_key_path: path });
   };
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (httpEnabled && (!httpHost.trim() || httpPort <= 0)) return onNotify('请填写有效的 HTTP 代理主机和端口', 'error');
-    if (socksEnabled && (!socksHost.trim() || socksPort <= 0)) return onNotify('请填写有效的 SOCKS5 代理主机和端口', 'error');
+    if (httpEnabled && (!httpHost.trim() || httpPort <= 0)) return onNotify(t('settings.invalidHttpProxy'), 'error');
+    if (socksEnabled && (!socksHost.trim() || socksPort <= 0)) return onNotify(t('settings.invalidSocksProxy'), 'error');
     for (const connection of sshConnections) {
-      if (!connection.name.trim() || !connection.host.trim() || !connection.username.trim() || connection.port <= 0) return onNotify('请完整填写每个 SSH 连接的名称、主机、端口和用户名', 'error');
-      if (connection.auth_mode === 'Password' && !connection.password && !connection.password_configured) return onNotify(`SSH 连接“${connection.name}”需要填写密码`, 'error');
-      if (connection.auth_mode === 'PrivateKey' && !connection.private_key_path.trim()) return onNotify(`SSH 连接“${connection.name}”需要选择私钥文件`, 'error');
+      if (!connection.name.trim() || !connection.host.trim() || !connection.username.trim() || connection.port <= 0) return onNotify(t('settings.invalidSshConnection'), 'error');
+      if (connection.auth_mode === 'Password' && !connection.password && !connection.password_configured) return onNotify(t('settings.sshNeedsPassword', { name: connection.name }), 'error');
+      if (connection.auth_mode === 'PrivateKey' && !connection.private_key_path.trim()) return onNotify(t('settings.sshNeedsKey', { name: connection.name }), 'error');
     }
     const sshDrafts: SshConnectionDraft[] = sshConnections.map((connection) => ({
       id: connection.isNew ? null : connection.id,
@@ -1296,27 +1324,30 @@ function SettingsModal({
       });
       onSaved(next);
     } catch (error) {
-      onNotify(error instanceof Error ? error.message : '保存应用设置失败', 'error');
+      onNotify(error instanceof Error ? error.message : t('settings.saveFailed'), 'error');
     } finally {
       setSaving(false);
     }
   };
 
-  return <div className="modal-backdrop"><div className="dialog settings-dialog" role="dialog" aria-modal="true"><div className="modal-heading"><div><h2>应用设置</h2><p>集中管理上游代理和可复用的 SSH 连接</p></div><button className="icon-button" onClick={onClose}><X size={18} /></button></div><form onSubmit={submit}><div className="dialog-scroll settings-scroll">
-    <div className="settings-intro"><strong>应用级连接</strong><br />HTTP / SOCKS5 代理与 SSH 连接统一在这里管理。端口转发只引用 SSH 连接，不再重复保存主机和认证信息。</div>
-    <section className="settings-section"><div className="settings-section-heading"><div><strong>上游代理</strong><span>为 HTTP 请求和 SSH 连接提供可选出站路径</span></div></div><div className="proxy-settings-grid"><div className="proxy-setting"><div className="proxy-setting-header"><div className="proxy-setting-title"><Globe size={15} />HTTP 代理</div><label className="switch"><input type="checkbox" checked={httpEnabled} onChange={(event) => setHttpEnabled(event.target.checked)} /><span /></label></div><span>用于 HTTP profile 访问 HTTP/HTTPS 上游</span>{httpEnabled && <div className="proxy-endpoint-fields" style={{ marginTop: 11 }}><input className="mono-input" value={httpHost} onChange={(event) => setHttpHost(event.target.value)} placeholder="127.0.0.1" /><input className="mono-input" type="number" min="1" max="65535" value={httpPort} onChange={(event) => setHttpPort(Number(event.target.value))} placeholder="8080" /></div>}</div><div className="proxy-setting"><div className="proxy-setting-header"><div className="proxy-setting-title"><Wifi size={15} />SOCKS5 代理</div><label className="switch"><input type="checkbox" checked={socksEnabled} onChange={(event) => setSocksEnabled(event.target.checked)} /><span /></label></div><span>用于 SSH 连接；支持无认证 SOCKS5</span>{socksEnabled && <div className="proxy-endpoint-fields" style={{ marginTop: 11 }}><input className="mono-input" value={socksHost} onChange={(event) => setSocksHost(event.target.value)} placeholder="127.0.0.1" /><input className="mono-input" type="number" min="1" max="65535" value={socksPort} onChange={(event) => setSocksPort(Number(event.target.value))} placeholder="8099" /></div>}</div></div></section>
-    <section className="settings-section"><div className="settings-section-heading"><div><strong>SSH 连接</strong><span>可创建多个连接，供不同端口转发复用</span></div><button type="button" className="small-button" onClick={addSshConnection}><Plus size={13} />添加 SSH 连接</button></div>{sshConnections.length === 0 ? <div className="settings-empty"><Terminal size={20} /><strong>暂无 SSH 连接</strong><span>添加后，创建 SSH 端口转发时可直接选择。</span></div> : <div className="ssh-settings-list">{sshConnections.map((connection, index) => <SshConnectionSettingCard key={connection.editorKey} connection={connection} index={index} socksProxyConfigured={socksEnabled} onUpdate={(patch) => updateSshConnection(connection.editorKey, patch)} onRemove={() => removeSshConnection(connection.editorKey)} onChoosePrivateKey={() => void chooseSshPrivateKey(connection.editorKey)} />)}</div>}</section>
-  </div><div className="modal-footer"><button type="button" className="outline-button" onClick={onClose}>取消</button><button type="submit" className="primary-button" disabled={saving}>{saving ? <RefreshCw size={14} className="spinner" /> : <Save size={14} />}{saving ? '保存中…' : '保存设置'}</button></div></form></div></div>;
+  return <div className="modal-backdrop"><div className="dialog settings-dialog" role="dialog" aria-modal="true"><div className="modal-heading"><div><h2>{t('settings.title')}</h2><p>{t('settings.desc')}</p></div><button className="icon-button" onClick={onClose}><X size={18} /></button></div><form onSubmit={submit}><div className="dialog-scroll settings-scroll">
+    <section className="settings-section"><div className="settings-section-heading"><div><strong>{t('settings.languageTitle')}</strong><span>{t('settings.languageDesc')}</span></div></div><div className="form-field language-field"><select className="language-select" value={currentLanguage} aria-label={t('settings.languageTitle')} onChange={(event) => changeLanguage(event.target.value as LanguageCode)}>{LANGUAGES.map((language) => <option key={language.code} value={language.code}>{language.label}</option>)}</select></div></section>
+    <div className="settings-intro"><strong>{t('settings.introTitle')}</strong><br />{t('settings.introDesc')}</div>
+    <section className="settings-section"><div className="settings-section-heading"><div><strong>{t('settings.upstreamProxyTitle')}</strong><span>{t('settings.upstreamProxyDesc')}</span></div></div><div className="proxy-settings-grid"><div className="proxy-setting"><div className="proxy-setting-header"><div className="proxy-setting-title"><Globe size={15} />{t('settings.httpProxy')}</div><label className="switch"><input type="checkbox" checked={httpEnabled} onChange={(event) => setHttpEnabled(event.target.checked)} /><span /></label></div><span>{t('settings.httpProxyUse')}</span>{httpEnabled && <div className="proxy-endpoint-fields" style={{ marginTop: 11 }}><input className="mono-input" value={httpHost} onChange={(event) => setHttpHost(event.target.value)} placeholder="127.0.0.1" /><input className="mono-input" type="number" min="1" max="65535" value={httpPort} onChange={(event) => setHttpPort(Number(event.target.value))} placeholder="8080" /></div>}</div><div className="proxy-setting"><div className="proxy-setting-header"><div className="proxy-setting-title"><Wifi size={15} />{t('settings.socksProxy')}</div><label className="switch"><input type="checkbox" checked={socksEnabled} onChange={(event) => setSocksEnabled(event.target.checked)} /><span /></label></div><span>{t('settings.socksProxyUse')}</span>{socksEnabled && <div className="proxy-endpoint-fields" style={{ marginTop: 11 }}><input className="mono-input" value={socksHost} onChange={(event) => setSocksHost(event.target.value)} placeholder="127.0.0.1" /><input className="mono-input" type="number" min="1" max="65535" value={socksPort} onChange={(event) => setSocksPort(Number(event.target.value))} placeholder="8099" /></div>}</div></div></section>
+    <section className="settings-section"><div className="settings-section-heading"><div><strong>{t('settings.sshTitle')}</strong><span>{t('settings.sshDesc')}</span></div><button type="button" className="small-button" onClick={addSshConnection}><Plus size={13} />{t('settings.addSsh')}</button></div>{sshConnections.length === 0 ? <div className="settings-empty"><Terminal size={20} /><strong>{t('settings.noSsh')}</strong><span>{t('settings.noSshHint')}</span></div> : <div className="ssh-settings-list">{sshConnections.map((connection, index) => <SshConnectionSettingCard key={connection.editorKey} connection={connection} index={index} socksProxyConfigured={socksEnabled} onUpdate={(patch) => updateSshConnection(connection.editorKey, patch)} onRemove={() => removeSshConnection(connection.editorKey)} onChoosePrivateKey={() => void chooseSshPrivateKey(connection.editorKey)} />)}</div>}</section>
+  </div><div className="modal-footer"><button type="button" className="outline-button" onClick={onClose}>{t('common.cancel')}</button><button type="submit" className="primary-button" disabled={saving}>{saving ? <RefreshCw size={14} className="spinner" /> : <Save size={14} />}{saving ? t('common.saving') : t('settings.save')}</button></div></form></div></div>;
 }
 
 function SshConnectionSettingCard({ connection, index, socksProxyConfigured, onUpdate, onRemove, onChoosePrivateKey }: { connection: SshConnectionEditorState; index: number; socksProxyConfigured: boolean; onUpdate: (patch: Partial<SshConnectionEditorState>) => void; onRemove: () => void; onChoosePrivateKey: () => void }) {
-  return <article className="ssh-setting-card"><div className="ssh-setting-card-header"><div className="ssh-setting-title"><span className="ssh-setting-icon"><Terminal size={15} /></span><div><strong>{connection.name.trim() || `SSH 连接 ${index + 1}`}</strong><span>{connection.host.trim() ? `${connection.username || '用户'}@${formatAddress(connection.host, connection.port)}` : '尚未完成配置'}</span></div></div><button type="button" className="remove-row" onClick={onRemove} title="删除 SSH 连接"><Trash2 size={14} /></button></div>
-    <div className="ssh-setting-grid"><div className="form-field"><label>连接名称</label><input value={connection.name} onChange={(event) => onUpdate({ name: event.target.value })} placeholder="例如：生产跳板机" /></div><div className="form-field ssh-host-field"><label>SSH 主机</label><input className="mono-input" value={connection.host} onChange={(event) => onUpdate({ host: event.target.value })} placeholder="bastion.example.com" /></div><div className="form-field"><label>端口</label><input className="mono-input" type="number" min="1" max="65535" value={connection.port} onChange={(event) => onUpdate({ port: Number(event.target.value) })} /></div><div className="form-field"><label>用户名</label><input className="mono-input" value={connection.username} onChange={(event) => onUpdate({ username: event.target.value })} placeholder="deploy" /></div></div>
-    <div className="ssh-auth-row"><div><label className="batch-label">认证方式</label><div className="segment-control"><button type="button" className={connection.auth_mode === 'Password' ? 'active' : ''} onClick={() => onUpdate({ auth_mode: 'Password' })}><KeyRound size={13} />密码</button><button type="button" className={connection.auth_mode === 'PrivateKey' ? 'active' : ''} onClick={() => onUpdate({ auth_mode: 'PrivateKey' })}><Lock size={13} />私钥</button></div></div>{connection.auth_mode === 'Password' ? <div className="form-field ssh-secret-field"><label>SSH 密码 {connection.password_configured && <span className="configured-badge"><Check size={11} />已保存</span>}</label><input type="password" value={connection.password} onChange={(event) => onUpdate({ password: event.target.value })} placeholder={connection.password_configured ? '留空保持现有密码' : '请输入密码'} autoComplete="new-password" /></div> : <div className="ssh-private-key-fields"><div className="form-field"><label>私钥文件</label><div className="field-with-action"><input className="mono-input" value={connection.private_key_path} onChange={(event) => onUpdate({ private_key_path: event.target.value })} placeholder="~/.ssh/id_ed25519" /><button type="button" className="small-button" onClick={onChoosePrivateKey}>选择</button></div></div><div className="form-field"><label>私钥口令 {connection.passphrase_configured && <span className="configured-badge"><Check size={11} />已保存</span>}</label><input type="password" value={connection.passphrase} onChange={(event) => onUpdate({ passphrase: event.target.value })} placeholder={connection.passphrase_configured ? '留空保持' : '可选'} autoComplete="new-password" /></div></div>}</div>
-    <div className="ssh-proxy-option"><span><Wifi size={14} /><span><strong>经应用级 SOCKS5 代理</strong><small>{socksProxyConfigured ? '使用上方 SOCKS5 代理建立 SSH 会话' : '当前尚未启用 SOCKS5 代理'}</small></span></span><label className="switch"><input type="checkbox" checked={connection.use_system_proxy} onChange={(event) => onUpdate({ use_system_proxy: event.target.checked })} /><span /></label></div>
+  const { t } = useTranslation();
+  return <article className="ssh-setting-card"><div className="ssh-setting-card-header"><div className="ssh-setting-title"><span className="ssh-setting-icon"><Terminal size={15} /></span><div><strong>{connection.name.trim() || t('sshCard.defaultName', { n: index + 1 })}</strong><span>{connection.host.trim() ? `${connection.username || t('sshCard.userFallback')}@${formatAddress(connection.host, connection.port, t)}` : t('sshCard.notComplete')}</span></div></div><button type="button" className="remove-row" onClick={onRemove} title={t('sshCard.deleteSsh')}><Trash2 size={14} /></button></div>
+    <div className="ssh-setting-grid"><div className="form-field"><label>{t('sshCard.nameLabel')}</label><input value={connection.name} onChange={(event) => onUpdate({ name: event.target.value })} placeholder={t('sshCard.namePlaceholder')} /></div><div className="form-field ssh-host-field"><label>{t('sshCard.hostLabel')}</label><input className="mono-input" value={connection.host} onChange={(event) => onUpdate({ host: event.target.value })} placeholder="bastion.example.com" /></div><div className="form-field"><label>{t('sshCard.portLabel')}</label><input className="mono-input" type="number" min="1" max="65535" value={connection.port} onChange={(event) => onUpdate({ port: Number(event.target.value) })} /></div><div className="form-field"><label>{t('sshCard.usernameLabel')}</label><input className="mono-input" value={connection.username} onChange={(event) => onUpdate({ username: event.target.value })} placeholder="deploy" /></div></div>
+    <div className="ssh-auth-row"><div><label className="batch-label">{t('sshCard.authModeLabel')}</label><div className="segment-control"><button type="button" className={connection.auth_mode === 'Password' ? 'active' : ''} onClick={() => onUpdate({ auth_mode: 'Password' })}><KeyRound size={13} />{t('sshCard.authPassword')}</button><button type="button" className={connection.auth_mode === 'PrivateKey' ? 'active' : ''} onClick={() => onUpdate({ auth_mode: 'PrivateKey' })}><Lock size={13} />{t('sshCard.authKey')}</button></div></div>{connection.auth_mode === 'Password' ? <div className="form-field ssh-secret-field"><label>{t('sshCard.passwordLabel')} {connection.password_configured && <span className="configured-badge"><Check size={11} />{t('common.saved')}</span>}</label><input type="password" value={connection.password} onChange={(event) => onUpdate({ password: event.target.value })} placeholder={connection.password_configured ? t('sshCard.keepPassword') : t('sshCard.enterPassword')} autoComplete="new-password" /></div> : <div className="ssh-private-key-fields"><div className="form-field"><label>{t('sshCard.privateKeyLabel')}</label><div className="field-with-action"><input className="mono-input" value={connection.private_key_path} onChange={(event) => onUpdate({ private_key_path: event.target.value })} placeholder="~/.ssh/id_ed25519" /><button type="button" className="small-button" onClick={onChoosePrivateKey}>{t('common.choose')}</button></div></div><div className="form-field"><label>{t('sshCard.passphraseLabel')} {connection.passphrase_configured && <span className="configured-badge"><Check size={11} />{t('common.saved')}</span>}</label><input type="password" value={connection.passphrase} onChange={(event) => onUpdate({ passphrase: event.target.value })} placeholder={connection.passphrase_configured ? t('sshCard.keepPassphrase') : t('sshCard.optional')} autoComplete="new-password" /></div></div>}</div>
+    <div className="ssh-proxy-option"><span><Wifi size={14} /><span><strong>{t('sshCard.viaSocks5Title')}</strong><small>{socksProxyConfigured ? t('sshCard.viaSocks5Desc') : t('sshCard.socksNotEnabled')}</small></span></span><label className="switch"><input type="checkbox" checked={connection.use_system_proxy} onChange={(event) => onUpdate({ use_system_proxy: event.target.checked })} /><span /></label></div>
   </article>;
 }
 
 function HostKeyModal({ request, onConfirm }: { request: HostKeyRequest; onConfirm: (accepted: boolean) => Promise<void> }) {
-  return <div className="modal-backdrop"><div className="dialog confirm-dialog" role="alertdialog" aria-modal="true"><div className="modal-heading"><div><h2>确认 SSH 主机密钥</h2><p>首次连接未知主机时需要人工确认</p></div><CircleHelp size={22} color="#b87812" /></div><div className="dialog-scroll"><div className="host-key-copy">{request.message}<br />请确认该指纹来自你信任的 SSH 主机。拒绝后不会保存。</div><div className="fingerprint">{request.fingerprint}</div><div className="field-hint">主机密钥保存后，如果后续指纹变化，连接会直接阻断，不会自动接受新密钥。</div></div><div className="confirm-actions"><button className="outline-button" onClick={() => void onConfirm(false)}>拒绝</button><button className="primary-button" onClick={() => void onConfirm(true)}><Check size={14} />信任并继续</button></div></div></div>;
+  const { t } = useTranslation();
+  return <div className="modal-backdrop"><div className="dialog confirm-dialog" role="alertdialog" aria-modal="true"><div className="modal-heading"><div><h2>{t('hostKey.title')}</h2><p>{t('hostKey.desc')}</p></div><CircleHelp size={22} color="#b87812" /></div><div className="dialog-scroll"><div className="host-key-copy">{request.message}<br />{t('hostKey.body')}</div><div className="fingerprint">{request.fingerprint}</div><div className="field-hint">{t('hostKey.hint')}</div></div><div className="confirm-actions"><button className="outline-button" onClick={() => void onConfirm(false)}>{t('hostKey.reject')}</button><button className="primary-button" onClick={() => void onConfirm(true)}><Check size={14} />{t('hostKey.trustAndContinue')}</button></div></div></div>;
 }
