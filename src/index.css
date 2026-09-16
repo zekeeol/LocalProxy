@@ -42,7 +42,8 @@ body {
 
 button,
 input,
-textarea {
+textarea,
+select {
   font: inherit;
 }
 
@@ -52,7 +53,8 @@ button {
 
 button:focus-visible,
 input:focus-visible,
-textarea:focus-visible {
+textarea:focus-visible,
+select:focus-visible {
   outline: 3px solid rgba(2, 132, 199, 0.22);
   outline-offset: 1px;
 }
@@ -1075,6 +1077,7 @@ button,
 
 .form-field input,
 .form-field textarea,
+.form-field select,
 .secret-row input,
 .forward-row input,
 .proxy-endpoint-fields input {
@@ -1090,14 +1093,25 @@ button,
 }
 
 .form-field input,
+.form-field select,
 .secret-row input,
 .forward-row input,
 .proxy-endpoint-fields input { height: 36px; padding: 0 11px; }
+
+.form-field select {
+  appearance: none;
+  padding-right: 28px;
+  background-image: linear-gradient(45deg, transparent 50%, #718694 50%), linear-gradient(135deg, #718694 50%, transparent 50%);
+  background-position: calc(100% - 15px) 15px, calc(100% - 11px) 15px;
+  background-repeat: no-repeat;
+  background-size: 4px 4px, 4px 4px;
+}
 
 .form-field textarea { min-height: 72px; padding: 9px 11px; resize: vertical; }
 
 .form-field input:focus,
 .form-field textarea:focus,
+.form-field select:focus,
 .secret-row input:focus,
 .forward-row input:focus,
 .proxy-endpoint-fields input:focus {
@@ -1117,6 +1131,161 @@ button,
   color: var(--muted);
   font-size: 10px;
   line-height: 1.5;
+}
+
+.wstunnel-section {
+  padding: 18px;
+}
+
+.wstunnel-server-grid {
+  gap: 14px;
+}
+
+.wstunnel-tls-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 12px 13px;
+  border: 1px solid #d5e6e8;
+  border-radius: 11px;
+  background: #f7fbfc;
+  cursor: pointer;
+}
+
+.wstunnel-tls-option > input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.wstunnel-checkbox {
+  display: inline-flex;
+  width: 19px;
+  height: 19px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  margin-top: 1px;
+  border: 1px solid #b8cdd2;
+  border-radius: 6px;
+  background: white;
+  color: transparent;
+  transition: 140ms ease;
+}
+
+.wstunnel-tls-option:has(input:checked) {
+  border-color: #b9ddd8;
+  background: #f1faf8;
+}
+
+.wstunnel-tls-option:has(input:focus-visible) {
+  outline: 3px solid rgba(2, 132, 199, 0.18);
+  outline-offset: 1px;
+}
+
+.wstunnel-tls-option:has(input:checked) .wstunnel-checkbox {
+  border-color: var(--teal);
+  background: var(--teal);
+  color: white;
+}
+
+.wstunnel-tls-copy {
+  min-width: 0;
+}
+
+.wstunnel-tls-copy strong {
+  display: block;
+  color: var(--ink-soft);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.wstunnel-tls-copy small {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.wstunnel-forwarding {
+  margin-top: 16px;
+  padding-top: 15px;
+  border-top: 1px solid #e8f0f2;
+}
+
+.wstunnel-forwarding-header,
+.wstunnel-forward-card-header,
+.wstunnel-empty-rules {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.wstunnel-forwarding-header {
+  margin-bottom: 10px;
+}
+
+.wstunnel-forwarding-header > div {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.wstunnel-forwarding-header strong,
+.wstunnel-forward-card-header strong,
+.wstunnel-empty-rules strong {
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+
+.wstunnel-forwarding-header span,
+.wstunnel-empty-rules span {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.wstunnel-add-button {
+  margin-top: 0;
+  white-space: nowrap;
+}
+
+.wstunnel-empty-rules {
+  padding: 13px 14px;
+  border: 1px dashed #c6dade;
+  border-radius: 11px;
+  background: #f9fcfc;
+}
+
+.wstunnel-empty-rules > div {
+  display: grid;
+  gap: 3px;
+}
+
+.wstunnel-empty-rules .small-button {
+  flex: 0 0 auto;
+}
+
+.wstunnel-forward-card {
+  margin-top: 9px;
+  padding: 12px;
+  border: 1px solid #dbe7e9;
+  border-radius: 11px;
+  background: #fbfdfd;
+}
+
+.wstunnel-forward-card-header {
+  margin-bottom: 10px;
+}
+
+.wstunnel-forward-grid {
+  display: grid;
+  grid-template-columns: 0.75fr 1fr 1.45fr 1fr 1fr;
+  gap: 9px;
+  align-items: start;
 }
 
 .field-with-action {
@@ -1425,6 +1594,7 @@ button,
   .detail-header { flex-direction: column; }
   .detail-actions { width: 100%; }
   .detail-actions button { flex: 1; }
+  .wstunnel-forward-grid { grid-template-columns: 0.75fr 1fr 1.45fr; }
 }
 
 @media (max-width: 650px) {
@@ -1438,6 +1608,9 @@ button,
   .modal-footer { padding-right: 16px; padding-left: 16px; }
   .form-grid,
   .form-grid.three { grid-template-columns: 1fr; }
+  .wstunnel-forward-grid { grid-template-columns: 1fr 1fr; }
+  .wstunnel-empty-rules { align-items: flex-start; flex-direction: column; }
+  .wstunnel-forwarding-header > div { align-items: flex-start; flex-direction: column; gap: 2px; }
   .form-field.full { grid-column: auto; }
   .forward-header { display: none; }
   .forward-row { grid-template-columns: 1fr 1fr 1fr 1fr 30px; }

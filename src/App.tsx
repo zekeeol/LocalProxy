@@ -1111,28 +1111,37 @@ function ProfileEditor({
                 <button type="button" className="primary-button" disabled={importing || !wgConfigText.trim()} onClick={() => void importWireGuardConfig()}>{importing ? '导入中…' : '解析并导入'}</button>
               </section>
             ) : kind === 'Wstunnel' ? (
-              <section className="form-section">
+              <section className="form-section wstunnel-section">
                 <div className="form-section-title"><h3>Wstunnel 隧道</h3><span>内置 Rust 客户端 · UDP / TCP over WebSocket</span></div>
-                <div className="form-grid">
+                <div className="form-grid wstunnel-server-grid">
                   <div className="form-field"><label>服务端 URL</label><input aria-label="Wstunnel 服务端" className="mono-input" value={wsConfig.server_url} onChange={e => setWsConfig({...wsConfig, server_url: e.target.value})} placeholder="wss://example.com:443" /></div>
                   <div className="form-field"><label>HTTP Upgrade 路径前缀</label><input aria-label="Upgrade 路径前缀" className="mono-input" value={wsConfig.http_upgrade_path_prefix} onChange={e => setWsConfig({...wsConfig, http_upgrade_path_prefix: e.target.value})} /></div>
                 </div>
-                <label><input type="checkbox" checked={wsConfig.tls_verify_certificate} onChange={e => setWsConfig({...wsConfig, tls_verify_certificate: e.target.checked})} /> 校验 TLS 证书</label>
-                <p className="field-hint">导入时保留命令的证书校验选项。UDP 超时为 0 表示永不超时，留空使用默认 30 秒。</p>
-                {wsConfig.forwards.map((f, index) => {
-                  const update = (patch: Partial<typeof f>) => setWsConfig({...wsConfig, forwards: wsConfig.forwards.map((row, i) => i === index ? {...row, ...patch} : row)});
-                  return <div className="form-section" key={index}>
-                    <div className="form-grid three">
-                      <div className="form-field"><label>协议</label><select value={f.protocol} onChange={e => update({protocol: e.target.value, timeout_sec: null})}><option value="udp">UDP</option><option value="tcp">TCP</option></select></div>
-                      <div className="form-field"><label>本地端口</label><input type="number" min="1" max="65535" value={f.local_port} onChange={e => update({local_port: Number(e.target.value)})} /></div>
-                      <div className="form-field"><label>远端端口</label><input type="number" min="1" max="65535" value={f.remote_port} onChange={e => update({remote_port: Number(e.target.value)})} /></div>
-                      <div className="form-field"><label>远端主机</label><input value={f.remote_host} onChange={e => update({remote_host: e.target.value})} /></div>
-                      {f.protocol === 'udp' && <div className="form-field"><label>UDP 超时（秒）</label><input type="number" min="0" max="4294967295" placeholder="30" value={f.timeout_sec ?? ''} onChange={e => update({timeout_sec: e.target.value === '' ? null : Number(e.target.value)})} /></div>}
-                    </div>
-                    <button type="button" className="small-button" onClick={() => setWsConfig({...wsConfig, forwards: wsConfig.forwards.filter((_, i) => i !== index)})}>删除规则</button>
-                  </div>;
-                })}
-                <button type="button" className="small-button" onClick={() => setWsConfig({...wsConfig, forwards: [...wsConfig.forwards, {protocol: 'udp', local_port: 50814, remote_host: 'localhost', remote_port: 50814, timeout_sec: 0}]})}><Plus size={14} />添加转发规则</button>
+                <label className="wstunnel-tls-option">
+                  <input type="checkbox" checked={wsConfig.tls_verify_certificate} onChange={e => setWsConfig({...wsConfig, tls_verify_certificate: e.target.checked})} />
+                  <span className="wstunnel-checkbox"><Check size={12} /></span>
+                  <span className="wstunnel-tls-copy"><strong>校验 TLS 证书</strong><small>启用 wss 时校验服务端证书；导入命令时保留原选项。</small></span>
+                </label>
+                <div className="wstunnel-forwarding">
+                  <div className="wstunnel-forwarding-header">
+                    <div><strong>转发规则</strong><span>{wsConfig.forwards.length > 0 ? `已配置 ${wsConfig.forwards.length} 条规则` : '将本地端口转发到远端服务'}</span></div>
+                    {wsConfig.forwards.length > 0 && <button type="button" className="add-row-button wstunnel-add-button" onClick={() => setWsConfig({...wsConfig, forwards: [...wsConfig.forwards, {protocol: 'udp', local_port: 50814, remote_host: 'localhost', remote_port: 50814, timeout_sec: 0}]})}><Plus size={13} />添加规则</button>}
+                  </div>
+                  {wsConfig.forwards.length === 0 && <div className="wstunnel-empty-rules"><div><strong>暂无转发规则</strong><span>添加 UDP 或 TCP 规则后即可启动隧道</span></div><button type="button" className="small-button" onClick={() => setWsConfig({...wsConfig, forwards: [...wsConfig.forwards, {protocol: 'udp', local_port: 50814, remote_host: 'localhost', remote_port: 50814, timeout_sec: 0}]})}><Plus size={14} />添加转发规则</button></div>}
+                  {wsConfig.forwards.map((f, index) => {
+                    const update = (patch: Partial<typeof f>) => setWsConfig({...wsConfig, forwards: wsConfig.forwards.map((row, i) => i === index ? {...row, ...patch} : row)});
+                    return <div className="wstunnel-forward-card" key={index}>
+                      <div className="wstunnel-forward-card-header"><strong>规则 {index + 1}</strong><button type="button" className="remove-row" onClick={() => setWsConfig({...wsConfig, forwards: wsConfig.forwards.filter((_, i) => i !== index)})} title="删除规则"><Trash2 size={14} /></button></div>
+                      <div className="wstunnel-forward-grid">
+                        <div className="form-field"><label>协议</label><select value={f.protocol} onChange={e => update({protocol: e.target.value, timeout_sec: null})}><option value="udp">UDP</option><option value="tcp">TCP</option></select></div>
+                        <div className="form-field"><label>本地端口</label><input className="mono-input" type="number" min="1" max="65535" value={f.local_port} onChange={e => update({local_port: Number(e.target.value)})} /></div>
+                        <div className="form-field"><label>远端主机</label><input className="mono-input" value={f.remote_host} onChange={e => update({remote_host: e.target.value})} placeholder="localhost" /></div>
+                        <div className="form-field"><label>远端端口</label><input className="mono-input" type="number" min="1" max="65535" value={f.remote_port} onChange={e => update({remote_port: Number(e.target.value)})} /></div>
+                        {f.protocol === 'udp' && <div className="form-field"><label>UDP 超时 <span>秒</span></label><input className="mono-input" type="number" min="0" max="4294967295" placeholder="30" value={f.timeout_sec ?? ''} onChange={e => update({timeout_sec: e.target.value === '' ? null : Number(e.target.value)})} /><div className="field-hint">0 表示永不超时</div></div>}
+                      </div>
+                    </div>;
+                  })}
+                </div>
               </section>
             ) : kind === 'Http' ? (
               <section className="form-section">
