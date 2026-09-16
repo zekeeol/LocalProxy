@@ -7,8 +7,8 @@ LocalProxy 是一个只面向 macOS 的本地代理桌面应用，使用 Electro
 - 固定上游的 HTTP/HTTPS 反向代理，支持 HTTP/1.1 流式请求/响应转发。
 - Headers/Cookies 配置按名称覆盖客户端同名值，敏感值只写入本地私密文件。
 - Wstunnel UDP/TCP over WebSocket（ws/wss），支持粘贴客户端命令快速导入。
-- SSH 密码或私钥文件认证、`direct-tcpip` 本地端口转发。
-- 应用级 HTTP/SOCKS5 出站代理；每个 HTTP/SSH profile 可单独选择是否经过它。
+- 应用级 SSH 连接支持密码或私钥认证，可被多个 `direct-tcpip` 本地端口转发复用。
+- 应用级 HTTP/SOCKS5 出站代理；HTTP profile 可选择 HTTP 代理，SSH 连接可选择 SOCKS5 代理。
 - SSH 主机密钥首次确认、指纹校验、keepalive 和指数退避自动重连。
 - HTTP 和 SSH 转发端口均支持固定端口或系统随机端口。
 - profile 和每条 SSH 转发规则支持 Tag，运行后界面显示并支持复制完整本地地址。
@@ -55,17 +55,17 @@ npm run dev:electron
 
 ## 使用方式
 
-打开“应用设置”，可以分别填写已有的 HTTP 代理和 SOCKS5 代理地址。它们是 LocalProxy 访问外部服务时使用的出站代理，不会在 LocalProxy 内部额外开启一个 SOCKS5 出口。
+打开“应用设置”，可以配置 HTTP/SOCKS5 出站代理，并维护多个可复用的 SSH 连接。这些代理只用于 LocalProxy 访问外部服务，不会在 LocalProxy 内部额外开启 SOCKS5 出口。
 
 创建 HTTP profile 时填写上游基础 URL 和本地端口；端口填写 `0` 会由系统随机分配。Headers/Cookies 支持逐项添加，也支持批量粘贴浏览器复制的“名称、下一行值”格式或每行一个 `名称: 值` 的格式。
 
-创建 SSH profile 时可以添加多条本地转发规则，例如 `3307 → db-readonly.example.com:3306`。远端主机支持域名、IPv4 和 IPv6，域名会作为 SSH `direct-tcpip` 的目标交给 SSH 服务器解析：
+先在“应用设置”中创建 SSH 连接，再创建 SSH profile 并选择该连接。一个连接可被多个 profile 复用，每个 profile 可添加多条本地转发规则，例如 `3307 → db-readonly.example.com:3306`。远端主机支持域名、IPv4 和 IPv6，域名会作为 SSH `direct-tcpip` 的目标交给 SSH 服务器解析：
 
 ```bash
 mysql --protocol=TCP -h 127.0.0.1 -P 3307 -u <mysql-user> -p
 ```
 
-如果 SSH profile 勾选“经过应用级 SOCKS5”，连接路径是：
+如果应用级 SSH 连接启用“经应用级 SOCKS5 代理”，连接路径是：
 
 ```text
 客户端 → LocalProxy → 配置的 SOCKS5 → SSH 会话 → 目标地址

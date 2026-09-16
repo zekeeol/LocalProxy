@@ -59,6 +59,14 @@ pub struct HttpDraft {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SshDraft {
+    pub connection_id: String,
+    pub forwards: Vec<ForwardDraft>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SshConnectionDraft {
+    pub id: Option<String>,
+    pub name: String,
     pub host: String,
     pub port: u16,
     pub username: String,
@@ -66,7 +74,6 @@ pub struct SshDraft {
     pub private_key_path: String,
     pub password: SecretPatch,
     pub passphrase: SecretPatch,
-    pub forwards: Vec<ForwardDraft>,
     pub use_system_proxy: bool,
 }
 
@@ -185,6 +192,8 @@ pub struct ForwardView {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SshView {
+    pub connection_id: String,
+    pub connection_name: String,
     pub host: String,
     pub port: u16,
     pub username: String,
@@ -206,12 +215,29 @@ pub struct ProxyEndpoint {
 pub struct AppSettingsDraft {
     pub http_proxy: Option<ProxyEndpoint>,
     pub socks_proxy: Option<ProxyEndpoint>,
+    #[serde(default)]
+    pub ssh_connections: Vec<SshConnectionDraft>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettingsView {
     pub http_proxy: Option<ProxyEndpoint>,
     pub socks_proxy: Option<ProxyEndpoint>,
+    pub ssh_connections: Vec<SshConnectionView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SshConnectionView {
+    pub id: String,
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub auth_mode: SshAuthMode,
+    pub private_key_path: String,
+    pub password_configured: bool,
+    pub passphrase_configured: bool,
+    pub use_system_proxy: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

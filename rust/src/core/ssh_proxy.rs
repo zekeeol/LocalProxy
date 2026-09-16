@@ -16,8 +16,8 @@ use crate::api::local_proxy::{Endpoint, EventKind, ServiceState, SshAuthMode};
 
 use super::{
     emit_log, forward_endpoint, known_host, set_reconnecting, set_running, set_status, upgrade,
-    AppController, PendingHostKey, StatusUpdate, StoredAppSettings, StoredForward,
-    StoredSshProfile,
+    AppController, PendingHostKey, ResolvedSshProfile, StatusUpdate, StoredAppSettings,
+    StoredForward,
 };
 
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
@@ -51,7 +51,7 @@ enum Socks5ConnectError {
 pub(crate) async fn run(
     weak: Weak<AppController>,
     id: String,
-    config: StoredSshProfile,
+    config: ResolvedSshProfile,
     settings: StoredAppSettings,
     mut stop_rx: oneshot::Receiver<()>,
 ) -> Result<(), String> {
@@ -72,7 +72,7 @@ pub(crate) async fn run(
 async fn run_loop(
     weak: &Weak<AppController>,
     id: &str,
-    config: &StoredSshProfile,
+    config: &ResolvedSshProfile,
     settings: &StoredAppSettings,
     stop_rx: &mut oneshot::Receiver<()>,
     cancellation: CancellationToken,
@@ -189,7 +189,7 @@ struct BoundAddresses {
     forward_listeners: Vec<(StoredForward, TcpListener)>,
 }
 
-async fn bind_listeners(config: &StoredSshProfile) -> Result<BoundAddresses, String> {
+async fn bind_listeners(config: &ResolvedSshProfile) -> Result<BoundAddresses, String> {
     let mut endpoints = Vec::new();
     let mut forward_listeners = Vec::with_capacity(config.forwards.len());
     for forward in &config.forwards {
@@ -337,7 +337,7 @@ async fn bridge_channel(
 async fn connect_authenticated(
     controller: &Arc<AppController>,
     profile_id: &str,
-    config: &StoredSshProfile,
+    config: &ResolvedSshProfile,
     settings: &StoredAppSettings,
 ) -> Result<Arc<client::Handle<ProxyClient>>, ConnectError> {
     let key_error = Arc::new(Mutex::new(None));
@@ -380,7 +380,7 @@ async fn connect_authenticated(
         SshAuthMode::Password => {
             let password = controller
                 .secrets
-                .get(profile_id, "ssh", "password")
+                .get(&config.connection_id, "ssh-connection", "password")
                 .map_err(ConnectError::Terminal)?;
             let result = session
                 .authenticate_password(config.username.clone(), password)
@@ -397,7 +397,7 @@ async fn connect_authenticated(
                 Some(
                     controller
                         .secrets
-                        .get(profile_id, "ssh", "passphrase")
+                        .get(&config.connection_id, "ssh-connection", "passphrase")
                         .map_err(ConnectError::Terminal)?,
                 )
             } else {
@@ -431,7 +431,7 @@ async fn connect_authenticated(
 }
 
 async fn connect_ssh_socket(
-    config: &StoredSshProfile,
+    config: &ResolvedSshProfile,
     settings: &StoredAppSettings,
 ) -> Result<TcpStream, ConnectError> {
     if config.use_system_proxy {
@@ -588,7 +588,7 @@ async fn consume_socks5_address(
     Ok(())
 }
 
-fn connection_route(config: &StoredSshProfile, settings: &StoredAppSettings) -> String {
+fn connection_route(config: &ResolvedSshProfile, settings: &StoredAppSettings) -> String {
     if !config.use_system_proxy {
         return String::new();
     }
@@ -725,17 +725,16 @@ fn next_delay(current: Duration) -> Duration {
 mod tests {
     use super::*;
 
-    fn test_config() -> StoredSshProfile {
-        StoredSshProfile {
+    fn test_config() -> ResolvedSshProfile {
+        ResolvedSshProfile {
+            connection_id: "connection-test".to_string(),
             host: "example.com".to_string(),
             port: 22,
             username: "tester".to_string(),
             auth_mode: SshAuthMode::Password,
             private_key_path: String::new(),
-            password_configured: true,
             passphrase_configured: false,
             forwards: Vec::new(),
-            upstream_socks_port: None,
             use_system_proxy: false,
         }
     }

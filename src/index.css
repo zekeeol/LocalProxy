@@ -977,7 +977,7 @@ button,
   box-shadow: 0 26px 80px rgba(21, 50, 62, 0.28);
 }
 
-.dialog.settings-dialog { width: min(650px, 100%); }
+.dialog.settings-dialog { width: min(860px, 100%); }
 .dialog.confirm-dialog { width: min(520px, 100%); }
 .dialog.type-picker-dialog { width: min(680px, 100%); }
 .type-grid {
@@ -1503,6 +1503,51 @@ button,
 
 .settings-intro strong { color: var(--teal); }
 
+.settings-scroll {
+  display: grid;
+  gap: 16px;
+}
+
+.settings-scroll .settings-intro {
+  margin-bottom: 0;
+}
+
+.settings-section {
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: white;
+}
+
+.settings-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 13px;
+}
+
+.settings-section-heading > div {
+  display: grid;
+  gap: 3px;
+}
+
+.settings-section-heading strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.settings-section-heading span {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.proxy-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
 .proxy-setting {
   margin-bottom: 12px;
   padding: 14px;
@@ -1512,6 +1557,18 @@ button,
 }
 
 .proxy-setting:last-child { margin-bottom: 0; }
+
+.proxy-setting > span {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.proxy-settings-grid .proxy-setting {
+  min-width: 0;
+  margin-bottom: 0;
+  background: #fbfdfd;
+}
 
 .proxy-setting-header {
   display: flex;
@@ -1525,6 +1582,191 @@ button,
 .proxy-setting-title svg { color: var(--teal); }
 .proxy-setting-header span { color: var(--muted); font-size: 10px; }
 .proxy-endpoint-fields { display: grid; grid-template-columns: minmax(0, 1fr) 130px; gap: 9px; }
+
+.ssh-settings-list {
+  display: grid;
+  gap: 11px;
+}
+
+.ssh-setting-card {
+  padding: 14px;
+  border: 1px solid #d5e3e6;
+  border-radius: 13px;
+  background: #fbfdfd;
+}
+
+.ssh-setting-card-header,
+.ssh-setting-title,
+.ssh-proxy-option,
+.ssh-proxy-option > span {
+  display: flex;
+  align-items: center;
+}
+
+.ssh-setting-card-header,
+.ssh-proxy-option {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ssh-setting-card-header {
+  margin-bottom: 13px;
+}
+
+.ssh-setting-title {
+  min-width: 0;
+  gap: 9px;
+}
+
+.ssh-setting-title > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.ssh-setting-title strong {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ssh-setting-title span {
+  overflow: hidden;
+  color: var(--muted);
+  font-family: "SF Mono", "JetBrains Mono", ui-monospace, monospace;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ssh-setting-icon {
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9px;
+  background: #e8f5f3;
+  color: var(--teal);
+}
+
+.ssh-setting-grid {
+  display: grid;
+  grid-template-columns: 1fr 1.35fr 90px 1fr;
+  gap: 10px;
+}
+
+.ssh-auth-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: end;
+  gap: 14px;
+  margin-top: 13px;
+  padding-top: 13px;
+  border-top: 1px solid #e7eff1;
+}
+
+.ssh-secret-field {
+  min-width: 0;
+}
+
+.ssh-private-key-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(150px, 0.75fr);
+  gap: 10px;
+}
+
+.ssh-proxy-option {
+  margin-top: 13px;
+  padding: 10px 11px;
+  border: 1px solid #d9e7e9;
+  border-radius: 10px;
+  background: white;
+}
+
+.ssh-proxy-option > span {
+  min-width: 0;
+  gap: 8px;
+  color: var(--teal);
+}
+
+.ssh-proxy-option > span > span {
+  display: grid;
+  gap: 2px;
+}
+
+.ssh-proxy-option strong {
+  color: var(--ink-soft);
+  font-size: 10px;
+}
+
+.ssh-proxy-option small {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.settings-empty,
+.ssh-connection-empty {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 16px;
+  border: 1px dashed #c6dade;
+  border-radius: 11px;
+  background: #f8fcfc;
+  color: var(--muted);
+}
+
+.settings-empty {
+  flex-direction: column;
+  justify-content: center;
+  min-height: 110px;
+  text-align: center;
+}
+
+.settings-empty strong,
+.ssh-connection-empty strong {
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+
+.settings-empty span,
+.ssh-connection-empty span {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.ssh-connection-empty > div,
+.selected-ssh-connection > div {
+  display: grid;
+  gap: 3px;
+}
+
+.selected-ssh-connection {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid #cce3df;
+  border-radius: 10px;
+  background: #f1faf8;
+  color: var(--teal);
+}
+
+.selected-ssh-connection strong {
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+
+.selected-ssh-connection span {
+  color: var(--muted);
+  font-size: 10px;
+}
 
 .host-key-copy {
   padding: 0 4px;
@@ -1595,6 +1837,9 @@ button,
   .detail-actions { width: 100%; }
   .detail-actions button { flex: 1; }
   .wstunnel-forward-grid { grid-template-columns: 0.75fr 1fr 1.45fr; }
+  .proxy-settings-grid { grid-template-columns: 1fr; }
+  .ssh-setting-grid { grid-template-columns: 1fr 1.35fr 90px; }
+  .ssh-setting-grid > :last-child { grid-column: 1 / -1; }
 }
 
 @media (max-width: 650px) {
@@ -1611,6 +1856,11 @@ button,
   .wstunnel-forward-grid { grid-template-columns: 1fr 1fr; }
   .wstunnel-empty-rules { align-items: flex-start; flex-direction: column; }
   .wstunnel-forwarding-header > div { align-items: flex-start; flex-direction: column; gap: 2px; }
+  .settings-section-heading { align-items: flex-start; flex-direction: column; }
+  .ssh-setting-grid,
+  .ssh-auth-row,
+  .ssh-private-key-fields { grid-template-columns: 1fr; }
+  .ssh-setting-grid > :last-child { grid-column: auto; }
   .form-field.full { grid-column: auto; }
   .forward-header { display: none; }
   .forward-row { grid-template-columns: 1fr 1fr 1fr 1fr 30px; }

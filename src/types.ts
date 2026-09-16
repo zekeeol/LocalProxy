@@ -47,6 +47,8 @@ export type ForwardView = {
 };
 
 export type SshView = {
+  connection_id: string;
+  connection_name: string;
   host: string;
   port: number;
   username: string;
@@ -148,15 +150,8 @@ export type ProfileDraft = {
     use_system_proxy: boolean;
   } | null;
   ssh: {
-    host: string;
-    port: number;
-    username: string;
-    auth_mode: AuthMode;
-    private_key_path: string;
-    password: SecretPatch;
-    passphrase: SecretPatch;
+    connection_id: string;
     forwards: ForwardDraft[];
-    use_system_proxy: boolean;
   } | null;
 };
 
@@ -168,6 +163,33 @@ export type ProxyEndpoint = {
 export type AppSettings = {
   http_proxy: ProxyEndpoint | null;
   socks_proxy: ProxyEndpoint | null;
+  ssh_connections: SshConnection[];
+};
+
+export type SshConnection = {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  auth_mode: AuthMode;
+  private_key_path: string;
+  password_configured: boolean;
+  passphrase_configured: boolean;
+  use_system_proxy: boolean;
+};
+
+export type SshConnectionDraft = {
+  id: string | null;
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  auth_mode: AuthMode;
+  private_key_path: string;
+  password: SecretPatch;
+  passphrase: SecretPatch;
+  use_system_proxy: boolean;
 };
 
 export type ProxyEvent = {

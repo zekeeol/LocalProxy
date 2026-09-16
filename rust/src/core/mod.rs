@@ -17,11 +17,12 @@ use uuid::Uuid;
 use crate::api::local_proxy::{
     AppSettingsDraft, AppSettingsView, Endpoint, EventKind, ForwardView, HttpDraft, HttpView,
     ProfileDraft, ProfileSummary, ProfileView, ProxyEndpoint, ProxyEvent, ProxyType,
-    SecretFieldView, SecretPatch, SecretPatchKind, ServiceState, SshAuthMode, SshDraft, SshView,
-    StartOutcome, WireGuardConfig, WireGuardView, WstunnelConfig,
+    SecretFieldView, SecretPatch, SecretPatchKind, ServiceState, SshAuthMode, SshConnectionDraft,
+    SshConnectionView, SshDraft, SshView, StartOutcome, WireGuardConfig, WireGuardView,
+    WstunnelConfig,
 };
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 const CONFIG_DIRECTORY: &str = "LocalProxy";
 const CONFIG_FILE: &str = "profiles.json";
 const PRIVATE_FILE: &str = "private.json";
@@ -85,6 +86,8 @@ pub(crate) struct StoredAppSettings {
     pub(crate) http_proxy: Option<StoredProxyEndpoint>,
     #[serde(default)]
     pub(crate) socks_proxy: Option<StoredProxyEndpoint>,
+    #[serde(default)]
+    pub(crate) ssh_connections: Vec<StoredSshConnection>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,18 +123,55 @@ struct StoredHttpProfile {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredSshProfile {
-    host: String,
-    port: u16,
-    username: String,
-    auth_mode: SshAuthMode,
-    private_key_path: String,
-    password_configured: bool,
-    passphrase_configured: bool,
+    #[serde(default)]
+    connection_id: String,
     forwards: Vec<StoredForward>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    auth_mode: Option<SshAuthMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    private_key_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    password_configured: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    passphrase_configured: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     upstream_socks_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    use_system_proxy: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct StoredSshConnection {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) host: String,
+    pub(crate) port: u16,
+    pub(crate) username: String,
+    pub(crate) auth_mode: SshAuthMode,
+    pub(crate) private_key_path: String,
+    pub(crate) password_configured: bool,
+    pub(crate) passphrase_configured: bool,
     #[serde(default)]
-    use_system_proxy: bool,
+    pub(crate) use_system_proxy: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedSshProfile {
+    pub(crate) connection_id: String,
+    pub(crate) host: String,
+    pub(crate) port: u16,
+    pub(crate) username: String,
+    pub(crate) auth_mode: SshAuthMode,
+    pub(crate) private_key_path: String,
+    pub(crate) passphrase_configured: bool,
+    pub(crate) forwards: Vec<StoredForward>,
+    pub(crate) use_system_proxy: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,7 +180,7 @@ struct StoredSecretField {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct StoredForward {
+pub(crate) struct StoredForward {
     local_port: u16,
     remote_host: String,
     remote_port: u16,
@@ -236,6 +276,26 @@ impl SecretStore {
         }
     }
 
+    fn move_secret(
+        &self,
+        from_id: &str,
+        from_category: &str,
+        to_id: &str,
+        to_category: &str,
+        name: &str,
+    ) -> Result<(), String> {
+        let _guard = self
+            .file_lock
+            .lock()
+            .map_err(|_| "私密文件锁已损坏".to_string())?;
+        let mut secrets = self.read_all()?;
+        let Some(value) = secrets.remove(&Self::key(from_id, from_category, name)) else {
+            return Ok(());
+        };
+        secrets.insert(Self::key(to_id, to_category, name), value);
+        self.write_all(&secrets)
+    }
+
     fn delete_profile(&self, profile: &StoredProfile) {
         if let Some(http) = &profile.http {
             for field in &http.headers {
@@ -244,10 +304,6 @@ impl SecretStore {
             for field in &http.cookies {
                 self.delete(&profile.id, "http-cookie", &field.name);
             }
-        }
-        if profile.ssh.is_some() {
-            self.delete(&profile.id, "ssh", "password");
-            self.delete(&profile.id, "ssh", "passphrase");
         }
         if profile.wireguard.is_some() {
             self.delete(&profile.id, "wireguard", "private-key");
@@ -270,15 +326,16 @@ pub(crate) fn init() {
 
     let data_dir = data_directory();
     let _ = fs::create_dir_all(&data_dir);
-    let store = load_store(&data_dir).unwrap_or_default();
+    let secrets = SecretStore {
+        data_dir: data_dir.clone(),
+        file_lock: Mutex::new(()),
+    };
+    let store = load_store(&data_dir, &secrets).unwrap_or_default();
     let (events, _) = broadcast::channel(256);
     let controller = Arc::new(AppController {
         data_dir: data_dir.clone(),
         store: Mutex::new(store),
-        secrets: SecretStore {
-            data_dir: data_dir.clone(),
-            file_lock: Mutex::new(()),
-        },
+        secrets,
         active: Mutex::new(HashMap::new()),
         statuses: Mutex::new(HashMap::new()),
         pending_host_keys: Mutex::new(HashMap::new()),
@@ -315,7 +372,7 @@ fn config_path(data_dir: &Path) -> PathBuf {
     data_dir.join(CONFIG_FILE)
 }
 
-fn load_store(data_dir: &Path) -> Result<StoreFile, String> {
+fn load_store(data_dir: &Path, secrets: &SecretStore) -> Result<StoreFile, String> {
     let path = config_path(data_dir);
     if !path.exists() {
         return Ok(StoreFile::default());
@@ -323,13 +380,18 @@ fn load_store(data_dir: &Path) -> Result<StoreFile, String> {
     let bytes = fs::read(&path).map_err(|error| format!("读取配置失败: {error}"))?;
     let mut store: StoreFile = serde_json::from_slice(&bytes)
         .map_err(|error| format!("配置文件格式无效，请检查 {}: {error}", path.display()))?;
-    if store.schema_version != SCHEMA_VERSION {
+    if !matches!(store.schema_version, 1 | SCHEMA_VERSION) {
         return Err(format!("不支持的配置版本: {}", store.schema_version));
     }
     store
         .profiles
         .retain(|profile| !profile.id.trim().is_empty());
     migrate_legacy_ssh_proxy(&mut store);
+    let migrated = migrate_ssh_connections(&mut store, secrets)?;
+    if migrated {
+        store.schema_version = SCHEMA_VERSION;
+        persist_store_file(data_dir, &store)?;
+    }
     Ok(store)
 }
 
@@ -356,10 +418,76 @@ fn migrate_legacy_ssh_proxy(store: &mut StoreFile) {
     for profile in &mut store.profiles {
         if let Some(ssh) = profile.ssh.as_mut() {
             if ssh.upstream_socks_port == Some(migrated_port) {
-                ssh.use_system_proxy = true;
+                ssh.use_system_proxy = Some(true);
             }
         }
     }
+}
+
+fn migrate_ssh_connections(store: &mut StoreFile, secrets: &SecretStore) -> Result<bool, String> {
+    let mut migrated = store.schema_version < SCHEMA_VERSION;
+    for profile in &mut store.profiles {
+        let Some(ssh) = profile.ssh.as_mut() else {
+            continue;
+        };
+        if !ssh.connection_id.is_empty() {
+            continue;
+        }
+        let connection_id = Uuid::new_v4().to_string();
+        let password_configured = ssh.password_configured.unwrap_or(false);
+        let passphrase_configured = ssh.passphrase_configured.unwrap_or(false);
+        if password_configured {
+            secrets.move_secret(
+                &profile.id,
+                "ssh",
+                &connection_id,
+                "ssh-connection",
+                "password",
+            )?;
+        }
+        if passphrase_configured {
+            secrets.move_secret(
+                &profile.id,
+                "ssh",
+                &connection_id,
+                "ssh-connection",
+                "passphrase",
+            )?;
+        }
+        store.settings.ssh_connections.push(StoredSshConnection {
+            id: connection_id.clone(),
+            name: format!("{} SSH", profile.name),
+            host: ssh.host.take().ok_or("旧 SSH 配置缺少主机")?,
+            port: ssh.port.take().unwrap_or(22),
+            username: ssh.username.take().ok_or("旧 SSH 配置缺少用户名")?,
+            auth_mode: ssh.auth_mode.take().unwrap_or(SshAuthMode::Password),
+            private_key_path: ssh.private_key_path.take().unwrap_or_default(),
+            password_configured,
+            passphrase_configured,
+            use_system_proxy: ssh.use_system_proxy.take().unwrap_or(false),
+        });
+        ssh.connection_id = connection_id;
+        ssh.password_configured = None;
+        ssh.passphrase_configured = None;
+        ssh.upstream_socks_port = None;
+        migrated = true;
+    }
+    Ok(migrated)
+}
+
+fn persist_store_file(data_dir: &Path, store: &StoreFile) -> Result<(), String> {
+    let path = config_path(data_dir);
+    let temp_path = path.with_extension("json.tmp");
+    let bytes =
+        serde_json::to_vec_pretty(store).map_err(|error| format!("序列化配置失败: {error}"))?;
+    let mut file =
+        fs::File::create(&temp_path).map_err(|error| format!("写入配置失败: {error}"))?;
+    use std::io::Write;
+    file.write_all(&bytes)
+        .map_err(|error| format!("写入配置失败: {error}"))?;
+    file.sync_all()
+        .map_err(|error| format!("同步配置失败: {error}"))?;
+    fs::rename(&temp_path, &path).map_err(|error| format!("替换配置失败: {error}"))
 }
 
 fn persist_store(controller: &AppController) -> Result<(), String> {
@@ -368,19 +496,7 @@ fn persist_store(controller: &AppController) -> Result<(), String> {
         .lock()
         .map_err(|_| "配置锁已损坏".to_string())?
         .clone();
-    let path = config_path(&controller.data_dir);
-    let temp_path = path.with_extension("json.tmp");
-    let bytes =
-        serde_json::to_vec_pretty(&store).map_err(|error| format!("序列化配置失败: {error}"))?;
-    let mut file =
-        fs::File::create(&temp_path).map_err(|error| format!("写入配置失败: {error}"))?;
-    use std::io::Write;
-    file.write_all(&bytes)
-        .map_err(|error| format!("写入配置失败: {error}"))?;
-    file.sync_all()
-        .map_err(|error| format!("同步配置失败: {error}"))?;
-    fs::rename(&temp_path, &path).map_err(|error| format!("替换配置失败: {error}"))?;
-    Ok(())
+    persist_store_file(&controller.data_dir, &store)
 }
 
 fn status_for(controller: &AppController, id: &str) -> RuntimeSnapshot {
@@ -615,9 +731,61 @@ pub(crate) fn get_settings() -> Result<AppSettingsView, String> {
 
 pub(crate) fn save_settings(settings: AppSettingsDraft) -> Result<AppSettingsView, String> {
     let controller = controller();
+    let (previous, referenced_connections) = {
+        let store = controller
+            .store
+            .lock()
+            .map_err(|_| "配置锁已损坏".to_string())?;
+        (
+            store.settings.clone(),
+            store
+                .profiles
+                .iter()
+                .filter_map(|profile| profile.ssh.as_ref().map(|ssh| ssh.connection_id.clone()))
+                .collect::<HashSet<_>>(),
+        )
+    };
+    let requested_existing_ids = settings
+        .ssh_connections
+        .iter()
+        .filter_map(|connection| connection.id.as_deref())
+        .filter(|id| !id.trim().is_empty())
+        .collect::<HashSet<_>>();
+    let removed = previous
+        .ssh_connections
+        .iter()
+        .filter(|connection| !requested_existing_ids.contains(connection.id.as_str()))
+        .collect::<Vec<_>>();
+    if let Some(connection) = removed
+        .iter()
+        .find(|connection| referenced_connections.contains(&connection.id))
+    {
+        return Err(format!(
+            "SSH 连接“{}”仍被端口转发配置使用，无法删除",
+            connection.name
+        ));
+    }
+    let mut ssh_connections = Vec::with_capacity(settings.ssh_connections.len());
+    let mut connection_ids = HashSet::new();
+    for draft in settings.ssh_connections {
+        let id = draft
+            .id
+            .clone()
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        if !connection_ids.insert(id.clone()) {
+            return Err("同一 SSH 连接不能重复保存".to_string());
+        }
+        let old = previous
+            .ssh_connections
+            .iter()
+            .find(|connection| connection.id == id);
+        ssh_connections.push(build_ssh_connection(&controller, &id, draft, old)?);
+    }
     let stored = StoredAppSettings {
         http_proxy: normalize_proxy_endpoint(settings.http_proxy, "HTTP 代理")?,
         socks_proxy: normalize_proxy_endpoint(settings.socks_proxy, "SOCKS5 代理")?,
+        ssh_connections,
     };
     {
         let mut store = controller
@@ -627,6 +795,14 @@ pub(crate) fn save_settings(settings: AppSettingsDraft) -> Result<AppSettingsVie
         store.settings = stored.clone();
     }
     persist_store(&controller)?;
+    for connection in removed {
+        controller
+            .secrets
+            .delete(&connection.id, "ssh-connection", "password");
+        controller
+            .secrets
+            .delete(&connection.id, "ssh-connection", "passphrase");
+    }
     Ok(settings_view(&stored))
 }
 
@@ -634,7 +810,96 @@ fn settings_view(settings: &StoredAppSettings) -> AppSettingsView {
     AppSettingsView {
         http_proxy: settings.http_proxy.as_ref().map(proxy_endpoint_view),
         socks_proxy: settings.socks_proxy.as_ref().map(proxy_endpoint_view),
+        ssh_connections: settings
+            .ssh_connections
+            .iter()
+            .map(|connection| SshConnectionView {
+                id: connection.id.clone(),
+                name: connection.name.clone(),
+                host: connection.host.clone(),
+                port: connection.port,
+                username: connection.username.clone(),
+                auth_mode: connection.auth_mode.clone(),
+                private_key_path: connection.private_key_path.clone(),
+                password_configured: connection.password_configured,
+                passphrase_configured: connection.passphrase_configured,
+                use_system_proxy: connection.use_system_proxy,
+            })
+            .collect(),
     }
+}
+
+fn build_ssh_connection(
+    controller: &AppController,
+    id: &str,
+    draft: SshConnectionDraft,
+    old: Option<&StoredSshConnection>,
+) -> Result<StoredSshConnection, String> {
+    let name = draft.name.trim();
+    if name.is_empty() {
+        return Err("SSH 连接名称不能为空".to_string());
+    }
+    let host = draft.host.trim();
+    if host.is_empty() {
+        return Err(format!("SSH 连接“{name}”的主机不能为空"));
+    }
+    if draft.port == 0 {
+        return Err(format!("SSH 连接“{name}”的端口必须大于 0"));
+    }
+    let username = draft.username.trim();
+    if username.is_empty() {
+        return Err(format!("SSH 连接“{name}”的用户名不能为空"));
+    }
+    let private_key_path = draft.private_key_path.trim();
+    if matches!(draft.auth_mode, SshAuthMode::PrivateKey) && private_key_path.is_empty() {
+        return Err(format!("SSH 连接“{name}”需要选择私钥文件"));
+    }
+    let old_password = old.is_some_and(|connection| connection.password_configured);
+    let old_passphrase = old.is_some_and(|connection| connection.passphrase_configured);
+    let password_configured = if matches!(draft.auth_mode, SshAuthMode::Password) {
+        let configured = apply_fixed_secret(
+            controller,
+            id,
+            "ssh-connection",
+            "password",
+            &draft.password,
+            old_password,
+        )?;
+        if !configured {
+            return Err(format!("SSH 连接“{name}”需要填写密码"));
+        }
+        true
+    } else {
+        controller.secrets.delete(id, "ssh-connection", "password");
+        false
+    };
+    let passphrase_configured = if matches!(draft.auth_mode, SshAuthMode::PrivateKey) {
+        apply_fixed_secret(
+            controller,
+            id,
+            "ssh-connection",
+            "passphrase",
+            &draft.passphrase,
+            old_passphrase,
+        )?
+    } else {
+        controller
+            .secrets
+            .delete(id, "ssh-connection", "passphrase");
+        false
+    };
+    Ok(StoredSshConnection {
+        id: id.to_string(),
+        name: name.to_string(),
+        host: host.to_string(),
+        port: draft.port,
+        username: username.to_string(),
+        auth_mode: draft.auth_mode,
+        private_key_path: private_key_path.to_string(),
+        password_configured,
+        passphrase_configured,
+        use_system_proxy: draft.use_system_proxy,
+    })
 }
 
 fn proxy_endpoint_view(endpoint: &StoredProxyEndpoint) -> ProxyEndpoint {
@@ -822,9 +1087,11 @@ pub(crate) fn start_profile(id: &str) -> Result<StartOutcome, String> {
                 remove_active(&controller, id);
                 return Err("SSH 配置不完整".to_string());
             };
+            let config = resolve_ssh_profile(&ssh, &settings)?;
             runtime().spawn(async move {
                 let result =
-                    ssh_proxy::run(weak.clone(), profile.id.clone(), ssh, settings, stop_rx).await;
+                    ssh_proxy::run(weak.clone(), profile.id.clone(), config, settings, stop_rx)
+                        .await;
                 if let Some(controller) = weak.upgrade() {
                     service_finished(&controller, &profile.id, result);
                 }
@@ -855,9 +1122,9 @@ fn validate_profile_proxy(
             }
         }
         ProxyType::Ssh => {
-            if profile.ssh.as_ref().is_some_and(|ssh| ssh.use_system_proxy)
-                && settings.socks_proxy.is_none()
-            {
+            let ssh = profile.ssh.as_ref().ok_or("SSH 配置不完整")?;
+            let config = resolve_ssh_profile(ssh, settings)?;
+            if config.use_system_proxy && settings.socks_proxy.is_none() {
                 return Err(
                     "该 SSH 配置已启用系统代理，请先在应用设置中配置 SOCKS5 代理".to_string(),
                 );
@@ -955,7 +1222,14 @@ pub(crate) fn confirm_host_key(id: &str, fingerprint: &str, accepted: bool) -> R
             let _ = pending.response.send(false);
             return Err("SSH 配置不存在".to_string());
         };
-        if let Err(error) = save_known_host(&controller, &ssh.host, ssh.port, fingerprint) {
+        let settings = controller
+            .store
+            .lock()
+            .map_err(|_| "配置锁已损坏".to_string())?
+            .settings
+            .clone();
+        let config = resolve_ssh_profile(&ssh, &settings)?;
+        if let Err(error) = save_known_host(&controller, &config.host, config.port, fingerprint) {
             let _ = pending.response.send(false);
             return Err(error);
         }
@@ -1006,6 +1280,28 @@ fn find_profile_optional(controller: &AppController, id: &str) -> Option<StoredP
             .iter()
             .find(|profile| profile.id == id)
             .cloned()
+    })
+}
+
+fn resolve_ssh_profile(
+    ssh: &StoredSshProfile,
+    settings: &StoredAppSettings,
+) -> Result<ResolvedSshProfile, String> {
+    let connection = settings
+        .ssh_connections
+        .iter()
+        .find(|connection| connection.id == ssh.connection_id)
+        .ok_or_else(|| "SSH 连接不存在，请在应用设置中重新选择".to_string())?;
+    Ok(ResolvedSshProfile {
+        connection_id: connection.id.clone(),
+        host: connection.host.clone(),
+        port: connection.port,
+        username: connection.username.clone(),
+        auth_mode: connection.auth_mode.clone(),
+        private_key_path: connection.private_key_path.clone(),
+        passphrase_configured: connection.passphrase_configured,
+        forwards: ssh.forwards.clone(),
+        use_system_proxy: connection.use_system_proxy,
     })
 }
 
@@ -1067,6 +1363,35 @@ fn configured_endpoints(profile: &StoredProfile) -> Vec<Endpoint> {
 
 fn view_for(controller: &AppController, profile: &StoredProfile) -> ProfileView {
     let snapshot = status_for(controller, &profile.id);
+    let ssh_view = profile.ssh.as_ref().and_then(|ssh| {
+        let settings = controller.store.lock().ok()?.settings.clone();
+        let connection = settings
+            .ssh_connections
+            .iter()
+            .find(|connection| connection.id == ssh.connection_id)?;
+        Some(SshView {
+            connection_id: connection.id.clone(),
+            connection_name: connection.name.clone(),
+            host: connection.host.clone(),
+            port: connection.port,
+            username: connection.username.clone(),
+            auth_mode: connection.auth_mode.clone(),
+            private_key_path: connection.private_key_path.clone(),
+            password_configured: connection.password_configured,
+            passphrase_configured: connection.passphrase_configured,
+            forwards: ssh
+                .forwards
+                .iter()
+                .map(|forward| ForwardView {
+                    local_port: forward.local_port,
+                    remote_host: forward.remote_host.clone(),
+                    remote_port: forward.remote_port,
+                    tag: forward.tag.clone(),
+                })
+                .collect(),
+            use_system_proxy: connection.use_system_proxy,
+        })
+    });
     ProfileView {
         id: profile.id.clone(),
         name: profile.name.clone(),
@@ -1108,26 +1433,7 @@ fn view_for(controller: &AppController, profile: &StoredProfile) -> ProfileView 
             ),
             peers: config.peers.clone(),
         }),
-        ssh: profile.ssh.as_ref().map(|ssh| SshView {
-            host: ssh.host.clone(),
-            port: ssh.port,
-            username: ssh.username.clone(),
-            auth_mode: ssh.auth_mode.clone(),
-            private_key_path: ssh.private_key_path.clone(),
-            password_configured: ssh.password_configured,
-            passphrase_configured: ssh.passphrase_configured,
-            forwards: ssh
-                .forwards
-                .iter()
-                .map(|forward| ForwardView {
-                    local_port: forward.local_port,
-                    remote_host: forward.remote_host.clone(),
-                    remote_port: forward.remote_port,
-                    tag: forward.tag.clone(),
-                })
-                .collect(),
-            use_system_proxy: ssh.use_system_proxy,
-        }),
+        ssh: ssh_view,
     }
 }
 
@@ -1198,8 +1504,7 @@ fn build_stored_profile(
         }
         ProxyType::Ssh => {
             let ssh = draft.ssh.ok_or_else(|| "SSH 配置不完整".to_string())?;
-            let old_ssh = previous.and_then(|profile| profile.ssh.as_ref());
-            let stored_ssh = build_ssh(controller, id, ssh, old_ssh)?;
+            let stored_ssh = build_ssh(controller, ssh)?;
             Ok(StoredProfile {
                 id: id.to_string(),
                 name: name.to_string(),
@@ -1366,25 +1671,21 @@ fn build_http(
     })
 }
 
-fn build_ssh(
-    controller: &AppController,
-    id: &str,
-    draft: SshDraft,
-    old: Option<&StoredSshProfile>,
-) -> Result<StoredSshProfile, String> {
-    let host = draft.host.trim();
-    if host.is_empty() {
-        return Err("SSH 主机不能为空".to_string());
+fn build_ssh(controller: &AppController, draft: SshDraft) -> Result<StoredSshProfile, String> {
+    let connection_id = draft.connection_id.trim();
+    if connection_id.is_empty() {
+        return Err("请选择 SSH 连接".to_string());
     }
-    if draft.username.trim().is_empty() {
-        return Err("SSH 用户名不能为空".to_string());
-    }
-    if draft.port == 0 {
-        return Err("SSH 远端端口必须大于 0".to_string());
-    }
-    let private_key_path = draft.private_key_path.trim();
-    if matches!(draft.auth_mode, SshAuthMode::PrivateKey) && private_key_path.is_empty() {
-        return Err("私钥认证需要填写私钥路径".to_string());
+    let connection_exists = controller
+        .store
+        .lock()
+        .map_err(|_| "配置锁已损坏".to_string())?
+        .settings
+        .ssh_connections
+        .iter()
+        .any(|connection| connection.id == connection_id);
+    if !connection_exists {
+        return Err("选择的 SSH 连接不存在".to_string());
     }
     let mut forwards = Vec::with_capacity(draft.forwards.len());
     for forward in draft.forwards {
@@ -1406,48 +1707,17 @@ fn build_ssh(
             return Err("SSH 本地监听端口不能重复".to_string());
         }
     }
-    let old_password = old.map(|old| old.password_configured).unwrap_or(false);
-    let old_passphrase = old.map(|old| old.passphrase_configured).unwrap_or(false);
-    let password_configured = if matches!(draft.auth_mode, SshAuthMode::Password) {
-        let configured = apply_fixed_secret(
-            controller,
-            id,
-            "ssh",
-            "password",
-            &draft.password,
-            old_password,
-        )?;
-        if !configured {
-            return Err("密码认证需要填写密码".to_string());
-        }
-        configured
-    } else {
-        controller.secrets.delete(id, "ssh", "password");
-        false
-    };
-    let passphrase_configured = if matches!(draft.auth_mode, SshAuthMode::PrivateKey) {
-        apply_fixed_secret(
-            controller,
-            id,
-            "ssh",
-            "passphrase",
-            &draft.passphrase,
-            old_passphrase,
-        )?
-    } else {
-        controller.secrets.delete(id, "ssh", "passphrase");
-        false
-    };
     Ok(StoredSshProfile {
-        host: host.to_string(),
-        port: draft.port,
-        username: draft.username.trim().to_string(),
-        auth_mode: draft.auth_mode,
-        private_key_path: private_key_path.to_string(),
-        password_configured,
-        passphrase_configured,
+        connection_id: connection_id.to_string(),
         forwards,
-        use_system_proxy: draft.use_system_proxy,
+        host: None,
+        port: None,
+        username: None,
+        auth_mode: None,
+        private_key_path: None,
+        password_configured: None,
+        passphrase_configured: None,
+        use_system_proxy: None,
         upstream_socks_port: None,
     })
 }
@@ -1609,11 +1879,7 @@ fn validate_port(port: u16, label: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        format_forward_target, normalize_forward_host, normalize_forward_tag, normalize_tags,
-        SecretStore, PRIVATE_FILE,
-    };
-    use std::sync::Mutex;
+    use super::*;
 
     fn test_secret_store() -> SecretStore {
         SecretStore {
@@ -1691,6 +1957,59 @@ mod tests {
         assert_eq!(mode, 0o600);
 
         std::fs::remove_dir_all(&store.data_dir).unwrap();
+    }
+
+    #[test]
+    fn migrates_profile_ssh_credentials_to_application_connection() {
+        let secrets = test_secret_store();
+        secrets
+            .set("profile-1", "ssh", "password", "legacy-password")
+            .unwrap();
+        let mut store = StoreFile {
+            schema_version: 1,
+            profiles: vec![StoredProfile {
+                id: "profile-1".to_string(),
+                name: "Production DB".to_string(),
+                tags: Vec::new(),
+                kind: ProxyType::Ssh,
+                http: None,
+                ssh: Some(StoredSshProfile {
+                    connection_id: String::new(),
+                    forwards: Vec::new(),
+                    host: Some("bastion.example.com".to_string()),
+                    port: Some(22),
+                    username: Some("deploy".to_string()),
+                    auth_mode: Some(SshAuthMode::Password),
+                    private_key_path: Some(String::new()),
+                    password_configured: Some(true),
+                    passphrase_configured: Some(false),
+                    upstream_socks_port: None,
+                    use_system_proxy: Some(false),
+                }),
+                wstunnel: None,
+                wireguard: None,
+            }],
+            known_hosts: HashMap::new(),
+            settings: StoredAppSettings::default(),
+        };
+
+        assert!(migrate_ssh_connections(&mut store, &secrets).unwrap());
+        let connection = &store.settings.ssh_connections[0];
+        assert_eq!(connection.name, "Production DB SSH");
+        assert_eq!(connection.host, "bastion.example.com");
+        assert_eq!(
+            store.profiles[0].ssh.as_ref().unwrap().connection_id,
+            connection.id
+        );
+        assert_eq!(
+            secrets
+                .get(&connection.id, "ssh-connection", "password")
+                .unwrap(),
+            "legacy-password"
+        );
+        assert!(secrets.get("profile-1", "ssh", "password").is_err());
+
+        std::fs::remove_dir_all(&secrets.data_dir).unwrap();
     }
 
     #[test]

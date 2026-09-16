@@ -45,7 +45,6 @@ import type {
   WireGuardStatus,
   WireGuardConfig,
   AppSettings,
-  AuthMode,
   Endpoint,
   ForwardDraft,
   LogEntry,
@@ -59,11 +58,19 @@ import type {
   SecretPatch,
   SecretRow,
   ServiceState,
+  SshConnection,
+  SshConnectionDraft,
 } from './types';
 
 type Toast = { id: number; message: string; tone: 'success' | 'info' | 'error' };
 type HostKeyRequest = { id: string; fingerprint: string; message: string };
 type ForwardRowState = ForwardDraft & { id: string };
+type SshConnectionEditorState = SshConnection & {
+  editorKey: string;
+  password: string;
+  passphrase: string;
+  isNew: boolean;
+};
 
 const DEFAULT_FORWARD: ForwardRowState = {
   id: 'forward-new',
@@ -271,7 +278,7 @@ export default function App() {
   const [profiles, setProfiles] = useState<ProfileSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selected, setSelected] = useState<ProfileView | null>(null);
-  const [settings, setSettings] = useState<AppSettings>({ http_proxy: null, socks_proxy: null });
+  const [settings, setSettings] = useState<AppSettings>({ http_proxy: null, socks_proxy: null, ssh_connections: [] });
   const [editor, setEditor] = useState<ProfileView | null | undefined>(undefined);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [hostKey, setHostKey] = useState<HostKeyRequest | null>(null);
@@ -819,6 +826,7 @@ function DetailView({
             <KeyValue label="DNS" value={profile.wireguard.dns.join(', ') || '未修改'} mono />
             <KeyValue label="对端数量" value={`${profile.wireguard.peers.length} 个`} />
           </> : profile.ssh ? <>
+            <KeyValue label="SSH 连接" value={profile.ssh.connection_name} />
             <KeyValue label="SSH 远端" value={`${profile.ssh.username}@${formatAddress(profile.ssh.host, profile.ssh.port)}`} mono />
             <KeyValue label="认证方式" value={profile.ssh.auth_mode === 'Password' ? (profile.ssh.password_configured ? '密码（已保存）' : '密码未配置') : '私钥文件'} />
             <KeyValue label="本地转发" value={`${profile.ssh.forwards.length} 条规则`} />
@@ -969,19 +977,11 @@ function ProfileEditor({
   const [cookies, setCookies] = useState<SecretRow[]>(() => makeSecretRows(initialHttp?.cookies, 'cookie'));
   const [removedHeaders, setRemovedHeaders] = useState<Set<string>>(() => new Set());
   const [removedCookies, setRemovedCookies] = useState<Set<string>>(() => new Set());
-  const [sshHost, setSshHost] = useState(initialSsh?.host ?? '');
-  const [sshPort, setSshPort] = useState(initialSsh?.port ?? 22);
-  const [sshUsername, setSshUsername] = useState(initialSsh?.username ?? '');
-  const [authMode, setAuthMode] = useState<AuthMode>(initialSsh?.auth_mode ?? 'Password');
-  const [privateKeyPath, setPrivateKeyPath] = useState(initialSsh?.private_key_path ?? '');
-  const [password, setPassword] = useState('');
-  const [passphrase, setPassphrase] = useState('');
-  const [passwordConfigured] = useState(initialSsh?.password_configured ?? false);
-  const [passphraseConfigured] = useState(initialSsh?.passphrase_configured ?? false);
-  const [sshUseProxy, setSshUseProxy] = useState(initialSsh?.use_system_proxy ?? false);
+  const [sshConnectionId, setSshConnectionId] = useState(initialSsh?.connection_id ?? settings.ssh_connections[0]?.id ?? '');
   const [forwardRows, setForwardRows] = useState<ForwardRowState[]>(() => (initialSsh?.forwards ?? []).map((forward, index) => ({ ...forward, id: `forward-${index}-${forward.local_port}` })));
   const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const selectedSshConnection = settings.ssh_connections.find((connection) => connection.id === sshConnectionId);
 
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
@@ -1039,10 +1039,7 @@ function ProfileEditor({
       return;
     }
 
-    if (!sshHost.trim()) return setFormError('请填写 SSH 主机');
-    if (!sshUsername.trim()) return setFormError('请填写 SSH 用户名');
-    if (sshPort <= 0) return setFormError('SSH 端口必须大于 0');
-    if (authMode === 'PrivateKey' && !privateKeyPath.trim()) return setFormError('私钥认证需要选择私钥文件');
+    if (!sshConnectionId) return setFormError('请先选择 SSH 连接');
     const forwards: ForwardDraft[] = [];
     for (const row of forwardRows) {
       const hasAnyValue = row.remote_host.trim() || row.remote_port > 0 || row.local_port > 0 || row.tag.trim();
@@ -1058,26 +1055,12 @@ function ProfileEditor({
       kind,
       http: null,
       ssh: {
-        host: sshHost.trim(),
-        port: sshPort,
-        username: sshUsername.trim(),
-        auth_mode: authMode,
-        private_key_path: privateKeyPath.trim(),
-        password: { name: 'password', value: password || null, kind: password ? 'Set' : passwordConfigured ? 'Keep' : 'Clear' },
-        passphrase: { name: 'passphrase', value: passphrase || null, kind: passphrase ? 'Set' : passphraseConfigured ? 'Keep' : 'Clear' },
+        connection_id: sshConnectionId,
         forwards,
-        use_system_proxy: sshUseProxy,
       },
     };
     setSaving(true);
     try { await onSave(draft); } catch { /* the parent presents the error toast */ } finally { setSaving(false); }
-  };
-
-  const choosePrivateKey = async () => {
-    const currentBridge = bridge();
-    if (!currentBridge) return onNotify('请通过 Electron 桌面端选择私钥文件', 'error');
-    const path = await currentBridge.choosePrivateKey();
-    if (path) setPrivateKeyPath(path);
   };
 
   return (
@@ -1156,21 +1139,11 @@ function ProfileEditor({
               </section>
             ) : (
               <section className="form-section">
-                <div className="form-section-title"><h3>SSH 连接</h3><span>支持密码或私钥认证，域名会由 SSH 服务器解析</span></div>
-                <div className="form-grid three">
-                  <div className="form-field"><label>SSH 主机</label><input className="mono-input" value={sshHost} onChange={(event) => setSshHost(event.target.value)} placeholder="bastion.example.com" /></div>
-                  <div className="form-field"><label>端口</label><input className="mono-input" type="number" min="1" max="65535" value={sshPort} onChange={(event) => setSshPort(Number(event.target.value))} /></div>
-                  <div className="form-field"><label>用户名</label><input className="mono-input" value={sshUsername} onChange={(event) => setSshUsername(event.target.value)} placeholder="deploy" /></div>
-                </div>
-                <div className="secret-section">
-                  <div className="secret-heading"><strong>认证方式</strong><span>密码、私钥口令不会进入配置文件或日志</span></div>
-                  <div className="segment-control"><button type="button" className={authMode === 'Password' ? 'active' : ''} onClick={() => setAuthMode('Password')}><KeyRound size={14} />密码</button><button type="button" className={authMode === 'PrivateKey' ? 'active' : ''} onClick={() => setAuthMode('PrivateKey')}><Lock size={14} />私钥</button></div>
-                  {authMode === 'Password' ? <div className="form-field" style={{ marginTop: 12 }}><label>SSH 密码 {passwordConfigured && <span className="configured-badge"><Check size={11} />已保存，留空保持</span>}</label><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder={passwordConfigured ? '留空保持现有密码' : '请输入密码'} autoComplete="new-password" /></div> : <>
-                    <div className="form-field" style={{ marginTop: 12 }}><label>私钥文件路径</label><div className="field-with-action"><input className="mono-input" value={privateKeyPath} onChange={(event) => setPrivateKeyPath(event.target.value)} placeholder="~/.ssh/id_ed25519" /><button type="button" className="small-button" onClick={() => void choosePrivateKey()}>选择文件</button></div></div>
-                    <div className="form-field" style={{ marginTop: 12 }}><label>私钥口令 {passphraseConfigured && <span className="configured-badge"><Check size={11} />已保存，留空保持</span>}</label><input type="password" value={passphrase} onChange={(event) => setPassphrase(event.target.value)} placeholder={passphraseConfigured ? '留空保持现有口令' : '没有口令可留空'} autoComplete="new-password" /></div>
-                  </>}
-                </div>
-                <div className="proxy-toggle-card"><div className="switch-row"><div className="switch-copy"><Wifi size={16} /><div><strong>通过应用级 SOCKS5 代理连接 SSH</strong><span>{settings.socks_proxy ? `当前代理：${formatAddress(settings.socks_proxy.host, settings.socks_proxy.port)}；不提供 SOCKS5 出口` : '请先在应用设置中配置 SOCKS5 代理'}</span></div></div><label className="switch"><input type="checkbox" checked={sshUseProxy} onChange={(event) => setSshUseProxy(event.target.checked)} /><span /></label></div></div>
+                <div className="form-section-title"><h3>SSH 端口转发</h3><span>选择应用级 SSH 连接，这里只管理转发规则</span></div>
+                {settings.ssh_connections.length === 0 ? <div className="ssh-connection-empty"><Terminal size={18} /><div><strong>还没有 SSH 连接</strong><span>请先到“应用设置 → SSH 连接”中添加连接。</span></div></div> : <>
+                  <div className="form-field"><label>使用 SSH 连接</label><select value={sshConnectionId} onChange={(event) => setSshConnectionId(event.target.value)}>{settings.ssh_connections.map((connection) => <option value={connection.id} key={connection.id}>{connection.name} · {connection.username}@{formatAddress(connection.host, connection.port)}</option>)}</select></div>
+                  {selectedSshConnection && <div className="selected-ssh-connection"><Terminal size={16} /><div><strong>{selectedSshConnection.name}</strong><span>{selectedSshConnection.auth_mode === 'Password' ? '密码认证' : '私钥认证'} · {selectedSshConnection.use_system_proxy ? '经应用 SOCKS5' : '直连'}</span></div></div>}
+                </>}
                 <ForwardEditor rows={forwardRows} setRows={setForwardRows} />
               </section>
             )}
@@ -1259,17 +1232,67 @@ function SettingsModal({
   const [httpPort, setHttpPort] = useState(initial.http_proxy?.port ?? 8099);
   const [socksHost, setSocksHost] = useState(initial.socks_proxy?.host ?? '127.0.0.1');
   const [socksPort, setSocksPort] = useState(initial.socks_proxy?.port ?? 8099);
+  const [sshConnections, setSshConnections] = useState<SshConnectionEditorState[]>(() => initial.ssh_connections.map((connection) => ({
+    ...connection,
+    editorKey: connection.id,
+    password: '',
+    passphrase: '',
+    isNew: false,
+  })));
   const [saving, setSaving] = useState(false);
+
+  const addSshConnection = () => setSshConnections((current) => [...current, {
+    id: '',
+    editorKey: `ssh-connection-${Date.now()}-${current.length}`,
+    name: '',
+    host: '',
+    port: 22,
+    username: '',
+    auth_mode: 'Password',
+    private_key_path: '',
+    password_configured: false,
+    passphrase_configured: false,
+    use_system_proxy: false,
+    password: '',
+    passphrase: '',
+    isNew: true,
+  }]);
+  const updateSshConnection = (editorKey: string, patch: Partial<SshConnectionEditorState>) => setSshConnections((current) => current.map((connection) => connection.editorKey === editorKey ? { ...connection, ...patch } : connection));
+  const removeSshConnection = (editorKey: string) => setSshConnections((current) => current.filter((connection) => connection.editorKey !== editorKey));
+  const chooseSshPrivateKey = async (editorKey: string) => {
+    const currentBridge = bridge();
+    if (!currentBridge) return onNotify('请通过 Electron 桌面端选择私钥文件', 'error');
+    const path = await currentBridge.choosePrivateKey();
+    if (path) updateSshConnection(editorKey, { private_key_path: path });
+  };
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     if (httpEnabled && (!httpHost.trim() || httpPort <= 0)) return onNotify('请填写有效的 HTTP 代理主机和端口', 'error');
     if (socksEnabled && (!socksHost.trim() || socksPort <= 0)) return onNotify('请填写有效的 SOCKS5 代理主机和端口', 'error');
+    for (const connection of sshConnections) {
+      if (!connection.name.trim() || !connection.host.trim() || !connection.username.trim() || connection.port <= 0) return onNotify('请完整填写每个 SSH 连接的名称、主机、端口和用户名', 'error');
+      if (connection.auth_mode === 'Password' && !connection.password && !connection.password_configured) return onNotify(`SSH 连接“${connection.name}”需要填写密码`, 'error');
+      if (connection.auth_mode === 'PrivateKey' && !connection.private_key_path.trim()) return onNotify(`SSH 连接“${connection.name}”需要选择私钥文件`, 'error');
+    }
+    const sshDrafts: SshConnectionDraft[] = sshConnections.map((connection) => ({
+      id: connection.isNew ? null : connection.id,
+      name: connection.name.trim(),
+      host: connection.host.trim(),
+      port: connection.port,
+      username: connection.username.trim(),
+      auth_mode: connection.auth_mode,
+      private_key_path: connection.private_key_path.trim(),
+      password: { name: 'password', value: connection.password || null, kind: connection.password ? 'Set' : connection.password_configured ? 'Keep' : 'Clear' },
+      passphrase: { name: 'passphrase', value: connection.passphrase || null, kind: connection.passphrase ? 'Set' : connection.passphrase_configured ? 'Keep' : 'Clear' },
+      use_system_proxy: connection.use_system_proxy,
+    }));
     setSaving(true);
     try {
       const next = await request<AppSettings>('save_settings', {
         http_proxy: httpEnabled ? { host: httpHost.trim(), port: httpPort } : null,
         socks_proxy: socksEnabled ? { host: socksHost.trim(), port: socksPort } : null,
+        ssh_connections: sshDrafts,
       });
       onSaved(next);
     } catch (error) {
@@ -1279,7 +1302,19 @@ function SettingsModal({
     }
   };
 
-  return <div className="modal-backdrop"><div className="dialog settings-dialog" role="dialog" aria-modal="true"><div className="modal-heading"><div><h2>应用设置</h2><p>集中配置外部代理；每个 HTTP / SSH profile 可单独决定是否使用</p></div><button className="icon-button" onClick={onClose}><X size={18} /></button></div><form onSubmit={submit}><div className="dialog-scroll"><div className="settings-intro"><strong>连接路径说明</strong><br />这里配置的是 LocalProxy 连接上游时使用的代理，不会额外开启 SOCKS5 出口。SSH 勾选“经过应用级 SOCKS5”后，链路为 LocalProxy → SOCKS5 → SSH 会话 → 目标地址。</div><div className="proxy-setting"><div className="proxy-setting-header"><div className="proxy-setting-title"><Globe size={15} />HTTP 代理</div><label className="switch"><input type="checkbox" checked={httpEnabled} onChange={(event) => setHttpEnabled(event.target.checked)} /><span /></label></div><span>用于 HTTP profile 访问 HTTP/HTTPS 上游</span>{httpEnabled && <div className="proxy-endpoint-fields" style={{ marginTop: 11 }}><input className="mono-input" value={httpHost} onChange={(event) => setHttpHost(event.target.value)} placeholder="127.0.0.1" /><input className="mono-input" type="number" min="1" max="65535" value={httpPort} onChange={(event) => setHttpPort(Number(event.target.value))} placeholder="8080" /></div>}</div><div className="proxy-setting"><div className="proxy-setting-header"><div className="proxy-setting-title"><Wifi size={15} />SOCKS5 代理</div><label className="switch"><input type="checkbox" checked={socksEnabled} onChange={(event) => setSocksEnabled(event.target.checked)} /><span /></label></div><span>用于 SSH profile 建立 SSH TCP 会话；支持无认证 SOCKS5</span>{socksEnabled && <div className="proxy-endpoint-fields" style={{ marginTop: 11 }}><input className="mono-input" value={socksHost} onChange={(event) => setSocksHost(event.target.value)} placeholder="127.0.0.1" /><input className="mono-input" type="number" min="1" max="65535" value={socksPort} onChange={(event) => setSocksPort(Number(event.target.value))} placeholder="8099" /></div>}</div></div><div className="modal-footer"><button type="button" className="outline-button" onClick={onClose}>取消</button><button type="submit" className="primary-button" disabled={saving}>{saving ? <RefreshCw size={14} className="spinner" /> : <Save size={14} />}{saving ? '保存中…' : '保存设置'}</button></div></form></div></div>;
+  return <div className="modal-backdrop"><div className="dialog settings-dialog" role="dialog" aria-modal="true"><div className="modal-heading"><div><h2>应用设置</h2><p>集中管理上游代理和可复用的 SSH 连接</p></div><button className="icon-button" onClick={onClose}><X size={18} /></button></div><form onSubmit={submit}><div className="dialog-scroll settings-scroll">
+    <div className="settings-intro"><strong>应用级连接</strong><br />HTTP / SOCKS5 代理与 SSH 连接统一在这里管理。端口转发只引用 SSH 连接，不再重复保存主机和认证信息。</div>
+    <section className="settings-section"><div className="settings-section-heading"><div><strong>上游代理</strong><span>为 HTTP 请求和 SSH 连接提供可选出站路径</span></div></div><div className="proxy-settings-grid"><div className="proxy-setting"><div className="proxy-setting-header"><div className="proxy-setting-title"><Globe size={15} />HTTP 代理</div><label className="switch"><input type="checkbox" checked={httpEnabled} onChange={(event) => setHttpEnabled(event.target.checked)} /><span /></label></div><span>用于 HTTP profile 访问 HTTP/HTTPS 上游</span>{httpEnabled && <div className="proxy-endpoint-fields" style={{ marginTop: 11 }}><input className="mono-input" value={httpHost} onChange={(event) => setHttpHost(event.target.value)} placeholder="127.0.0.1" /><input className="mono-input" type="number" min="1" max="65535" value={httpPort} onChange={(event) => setHttpPort(Number(event.target.value))} placeholder="8080" /></div>}</div><div className="proxy-setting"><div className="proxy-setting-header"><div className="proxy-setting-title"><Wifi size={15} />SOCKS5 代理</div><label className="switch"><input type="checkbox" checked={socksEnabled} onChange={(event) => setSocksEnabled(event.target.checked)} /><span /></label></div><span>用于 SSH 连接；支持无认证 SOCKS5</span>{socksEnabled && <div className="proxy-endpoint-fields" style={{ marginTop: 11 }}><input className="mono-input" value={socksHost} onChange={(event) => setSocksHost(event.target.value)} placeholder="127.0.0.1" /><input className="mono-input" type="number" min="1" max="65535" value={socksPort} onChange={(event) => setSocksPort(Number(event.target.value))} placeholder="8099" /></div>}</div></div></section>
+    <section className="settings-section"><div className="settings-section-heading"><div><strong>SSH 连接</strong><span>可创建多个连接，供不同端口转发复用</span></div><button type="button" className="small-button" onClick={addSshConnection}><Plus size={13} />添加 SSH 连接</button></div>{sshConnections.length === 0 ? <div className="settings-empty"><Terminal size={20} /><strong>暂无 SSH 连接</strong><span>添加后，创建 SSH 端口转发时可直接选择。</span></div> : <div className="ssh-settings-list">{sshConnections.map((connection, index) => <SshConnectionSettingCard key={connection.editorKey} connection={connection} index={index} socksProxyConfigured={socksEnabled} onUpdate={(patch) => updateSshConnection(connection.editorKey, patch)} onRemove={() => removeSshConnection(connection.editorKey)} onChoosePrivateKey={() => void chooseSshPrivateKey(connection.editorKey)} />)}</div>}</section>
+  </div><div className="modal-footer"><button type="button" className="outline-button" onClick={onClose}>取消</button><button type="submit" className="primary-button" disabled={saving}>{saving ? <RefreshCw size={14} className="spinner" /> : <Save size={14} />}{saving ? '保存中…' : '保存设置'}</button></div></form></div></div>;
+}
+
+function SshConnectionSettingCard({ connection, index, socksProxyConfigured, onUpdate, onRemove, onChoosePrivateKey }: { connection: SshConnectionEditorState; index: number; socksProxyConfigured: boolean; onUpdate: (patch: Partial<SshConnectionEditorState>) => void; onRemove: () => void; onChoosePrivateKey: () => void }) {
+  return <article className="ssh-setting-card"><div className="ssh-setting-card-header"><div className="ssh-setting-title"><span className="ssh-setting-icon"><Terminal size={15} /></span><div><strong>{connection.name.trim() || `SSH 连接 ${index + 1}`}</strong><span>{connection.host.trim() ? `${connection.username || '用户'}@${formatAddress(connection.host, connection.port)}` : '尚未完成配置'}</span></div></div><button type="button" className="remove-row" onClick={onRemove} title="删除 SSH 连接"><Trash2 size={14} /></button></div>
+    <div className="ssh-setting-grid"><div className="form-field"><label>连接名称</label><input value={connection.name} onChange={(event) => onUpdate({ name: event.target.value })} placeholder="例如：生产跳板机" /></div><div className="form-field ssh-host-field"><label>SSH 主机</label><input className="mono-input" value={connection.host} onChange={(event) => onUpdate({ host: event.target.value })} placeholder="bastion.example.com" /></div><div className="form-field"><label>端口</label><input className="mono-input" type="number" min="1" max="65535" value={connection.port} onChange={(event) => onUpdate({ port: Number(event.target.value) })} /></div><div className="form-field"><label>用户名</label><input className="mono-input" value={connection.username} onChange={(event) => onUpdate({ username: event.target.value })} placeholder="deploy" /></div></div>
+    <div className="ssh-auth-row"><div><label className="batch-label">认证方式</label><div className="segment-control"><button type="button" className={connection.auth_mode === 'Password' ? 'active' : ''} onClick={() => onUpdate({ auth_mode: 'Password' })}><KeyRound size={13} />密码</button><button type="button" className={connection.auth_mode === 'PrivateKey' ? 'active' : ''} onClick={() => onUpdate({ auth_mode: 'PrivateKey' })}><Lock size={13} />私钥</button></div></div>{connection.auth_mode === 'Password' ? <div className="form-field ssh-secret-field"><label>SSH 密码 {connection.password_configured && <span className="configured-badge"><Check size={11} />已保存</span>}</label><input type="password" value={connection.password} onChange={(event) => onUpdate({ password: event.target.value })} placeholder={connection.password_configured ? '留空保持现有密码' : '请输入密码'} autoComplete="new-password" /></div> : <div className="ssh-private-key-fields"><div className="form-field"><label>私钥文件</label><div className="field-with-action"><input className="mono-input" value={connection.private_key_path} onChange={(event) => onUpdate({ private_key_path: event.target.value })} placeholder="~/.ssh/id_ed25519" /><button type="button" className="small-button" onClick={onChoosePrivateKey}>选择</button></div></div><div className="form-field"><label>私钥口令 {connection.passphrase_configured && <span className="configured-badge"><Check size={11} />已保存</span>}</label><input type="password" value={connection.passphrase} onChange={(event) => onUpdate({ passphrase: event.target.value })} placeholder={connection.passphrase_configured ? '留空保持' : '可选'} autoComplete="new-password" /></div></div>}</div>
+    <div className="ssh-proxy-option"><span><Wifi size={14} /><span><strong>经应用级 SOCKS5 代理</strong><small>{socksProxyConfigured ? '使用上方 SOCKS5 代理建立 SSH 会话' : '当前尚未启用 SOCKS5 代理'}</small></span></span><label className="switch"><input type="checkbox" checked={connection.use_system_proxy} onChange={(event) => onUpdate({ use_system_proxy: event.target.checked })} /><span /></label></div>
+  </article>;
 }
 
 function HostKeyModal({ request, onConfirm }: { request: HostKeyRequest; onConfirm: (accepted: boolean) => Promise<void> }) {
