@@ -313,6 +313,10 @@ pub fn get_profile(id: String) -> Result<ProfileView, String> {
     core::get_profile(&id)
 }
 
+pub fn wireguard_private_key(id: String) -> Result<Option<String>, String> {
+    core::wireguard_private_key(&id)
+}
+
 pub fn get_settings() -> Result<AppSettingsView, String> {
     core::get_settings()
 }

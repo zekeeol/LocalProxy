@@ -905,6 +905,27 @@ function buildSshCommand(ssh: NonNullable<ProfileView['ssh']>, socksProxy: Proxy
   return `ssh -N ${proxy}${forwards} -p ${ssh.port} ${ssh.username}@${ssh.host}`.replace(/\s+/g, ' ').trim();
 }
 
+// Rebuilds wg-quick text from a stored profile. The private key is only
+// available when the editor explicitly fetches it for the stored profile;
+// otherwise it is rendered as a comment so pasted text still parses.
+function wireGuardConfigText(config: NonNullable<ProfileView['wireguard']>, t: TFunction, privateKey?: string | null): string {
+  const lines: string[] = ['[Interface]'];
+  if (privateKey) lines.push(`PrivateKey = ${privateKey}`);
+  else if (config.private_key_configured) lines.push(t('editor.wgPrivateKeySavedComment'));
+  lines.push(`Address = ${config.addresses.join(', ')}`);
+  if (config.mtu != null) lines.push(`MTU = ${config.mtu}`);
+  if (config.listen_port) lines.push(`ListenPort = ${config.listen_port}`);
+  if (config.dns.length > 0) lines.push(`DNS = ${config.dns.join(', ')}`);
+  for (const peer of config.peers) {
+    lines.push('', '[Peer]', `PublicKey = ${peer.public_key}`);
+    const host = peer.endpoint_host.includes(':') ? `[${peer.endpoint_host}]` : peer.endpoint_host;
+    lines.push(`Endpoint = ${host}:${peer.endpoint_port}`);
+    lines.push(`AllowedIPs = ${peer.allowed_ips.join(', ')}`);
+    if (peer.persistent_keepalive != null) lines.push(`PersistentKeepalive = ${peer.persistent_keepalive}`);
+  }
+  return lines.join('\n');
+}
+
 function ToastStack({ toasts, onDismiss }: { toasts: Toast[]; onDismiss: (id: number) => void }) {
   if (toasts.length === 0) return null;
   return <div className="toast-stack">{toasts.map((toast) => <div className={`toast ${toast.tone}`} key={toast.id}>{toast.tone === 'error' ? <AlertCircle size={16} /> : toast.tone === 'success' ? <CheckCircle2 size={16} /> : <Activity size={16} />}<span>{toast.message}</span><button onClick={() => onDismiss(toast.id)}><X size={14} /></button></div>)}</div>;
@@ -960,7 +981,19 @@ function ProfileEditor({
       peers: [],
     },
   );
-  const [wgConfigText, setWgConfigText] = useState('');
+  const [wgConfigText, setWgConfigText] = useState(() => initialWireGuard ? wireGuardConfigText(initialWireGuard, t) : '');
+  useEffect(() => {
+    const profileId = initial?.id;
+    if (!profileId || !initialWireGuard) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const key = await bridge()?.request<string | null>('wireguard_private_key', { id: profileId });
+        if (!cancelled && key) setWgConfigText(wireGuardConfigText(initialWireGuard, t, key));
+      } catch { /* keep the reconstructed text without the key */ }
+    })();
+    return () => { cancelled = true; };
+  }, [initial?.id]);
   const importWstunnel = async () => {
     const api = bridge();
     if (!api) return setFormError(t('editor.importNeedDesktop'));
@@ -978,6 +1011,11 @@ function ProfileEditor({
     setImporting(true); setFormError(null);
     try {
       const config = await api.request<WireGuardConfig>('parse_wg_config', { config: wgConfigText });
+      // Pasted text without a PrivateKey line keeps the key already stored for
+      // this profile; the core never returns the key value itself.
+      if (!config.private_key.value && initialWireGuard?.private_key_configured) {
+        config.private_key = { name: 'private_key', value: null, kind: 'Keep' };
+      }
       setWgConfig(config);
       if (!name.trim()) setName(t('editor.defaultWgName'));
       setWgConfigText('');

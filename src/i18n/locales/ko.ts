@@ -198,6 +198,7 @@ const ko: TranslationDict = {
     forwardPortInvalid: '규칙 {{host}}의 원격 포트는 0보다 커야 합니다',
     wgImportTitle: 'wg-quick 빠른 가져오기',
     wgImportDesc: '[Interface] / [Peer] 설정을 붙여넣어 주세요. 개인 키는 로컬 전용 파일에만 저장됩니다',
+    wgPrivateKeySavedComment: '# PrivateKey는 이 기기에 저장되어 있으며, 새 키를 붙여넣지 않으면 그대로 유지됩니다',
     importing: '가져오는 중…',
     parseAndImport: '분석 후 가져오기',
     wstunnelTitle: 'Wstunnel 터널',

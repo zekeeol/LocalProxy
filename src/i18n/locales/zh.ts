@@ -198,6 +198,7 @@ const zh: TranslationDict = {
     forwardPortInvalid: '转发规则 {{host}} 的远端端口必须大于 0',
     wgImportTitle: '从 wg-quick 快速导入',
     wgImportDesc: '粘贴 [Interface] / [Peer] 配置，私钥只写入本地私密文件',
+    wgPrivateKeySavedComment: '# PrivateKey 已保存在本机；不粘贴新密钥则保持不变',
     importing: '导入中…',
     parseAndImport: '解析并导入',
     wstunnelTitle: 'Wstunnel 隧道',

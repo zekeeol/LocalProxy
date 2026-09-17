@@ -198,6 +198,7 @@ const ja: TranslationDict = {
     forwardPortInvalid: 'ルール {{host}} のリモートポートは 0 より大きい必要があります',
     wgImportTitle: 'wg-quick からクイック取り込み',
     wgImportDesc: '[Interface] / [Peer] 設定を貼り付けてください。秘密鍵はローカルのプライベートファイルにのみ保存されます',
+    wgPrivateKeySavedComment: '# PrivateKey はこの端末に保存済みです。新しい鍵を貼り付けない限り変更されません',
     importing: '取り込み中…',
     parseAndImport: '解析して取り込む',
     wstunnelTitle: 'Wstunnel トンネル',

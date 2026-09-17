@@ -718,6 +718,17 @@ pub(crate) fn get_profile(id: &str) -> Result<ProfileView, String> {
     Ok(view_for(&controller, &profile))
 }
 
+// Only used to prefill the wg-quick editor for an existing profile. The value
+// stays on this machine and is never written to logs or status events.
+pub(crate) fn wireguard_private_key(id: &str) -> Result<Option<String>, String> {
+    let controller = controller();
+    let profile = find_profile(&controller, id)?;
+    if profile.kind != ProxyType::WireGuard {
+        return Err("该配置不是 WireGuard 隧道".into());
+    }
+    Ok(controller.secrets.get(id, "wireguard", "private-key").ok())
+}
+
 pub(crate) fn get_settings() -> Result<AppSettingsView, String> {
     let controller = controller();
     let settings = controller

@@ -137,6 +137,11 @@ async fn handle_request(request: IpcRequest) -> IpcResponse {
             "id",
             local_proxy_rust::api::local_proxy::get_profile,
         ),
+        "wireguard_private_key" => with_string(
+            &request.params,
+            "id",
+            local_proxy_rust::api::local_proxy::wireguard_private_key,
+        ),
         "get_settings" => serialize_result(local_proxy_rust::api::local_proxy::get_settings()),
         "save_settings" => with_params::<AppSettingsDraft, _, _>(
             &request.params,

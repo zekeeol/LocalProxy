@@ -196,6 +196,7 @@ const en = {
     forwardPortInvalid: 'Remote port of rule {{host}} must be greater than 0',
     wgImportTitle: 'Quick import from wg-quick',
     wgImportDesc: 'Paste the [Interface] / [Peer] config; private keys are written to a local private file only',
+    wgPrivateKeySavedComment: '# PrivateKey is already saved on this device and is kept as-is unless you paste a new one',
     importing: 'Importing…',
     parseAndImport: 'Parse and import',
     wstunnelTitle: 'Wstunnel tunnel',
