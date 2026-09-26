@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, nativeImage } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, nativeImage, powerMonitor } from 'electron';
 import { join } from 'node:path';
 import { RustCoreManager } from './rust-core';
 
@@ -56,6 +56,32 @@ function forwardRustEvents(): void {
   });
 }
 
+/**
+ * Sleep and screen lock both drop the WireGuard handshake, and the privileged
+ * helper cannot notice that by itself. Ask the core for a read-only health
+ * check; it re-applies the tunnel configuration through the helper that is
+ * already running, so this never triggers an administrator password prompt.
+ */
+function registerPowerHandlers(): void {
+  const recheck = (reason: string): void => {
+    setTimeout(() => {
+      void rustCore
+        .sendRequest('wireguard_revalidate', {})
+        .then((checked) => {
+          const count = typeof checked === 'number' ? checked : 0;
+          if (count > 0) {
+            console.info(`[LocalProxy] ${reason}后检查了 ${count} 条 WireGuard 隧道`);
+          }
+        })
+        .catch((error: unknown) => {
+          console.warn(`[LocalProxy] ${reason}后检查 WireGuard 隧道失败: ${String(error)}`);
+        });
+    }, 3_000);
+  };
+  powerMonitor.on('resume', () => recheck('系统唤醒'));
+  powerMonitor.on('unlock-screen', () => recheck('解锁屏幕'));
+}
+
 async function createWindow(): Promise<void> {
   mainWindow = new BrowserWindow({
     width: 1360,
@@ -94,6 +120,7 @@ app.whenReady().then(async () => {
   }
   registerIpcHandlers();
   forwardRustEvents();
+  registerPowerHandlers();
   try {
     await rustCore.start();
   } catch (error) {

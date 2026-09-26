@@ -1261,6 +1261,59 @@ pub(crate) async fn wireguard_status(
     wireguard::status(id).await
 }
 
+/// Checks running WireGuard tunnels and re-applies their configuration through
+/// the already-running helper. Called after the machine wakes up or the screen
+/// is unlocked: sleep usually breaks the tunnel's handshake and the helper
+/// cannot notice that by itself. Never starts a new helper, so this path can
+/// not raise an administrator prompt. Returns how many tunnels were checked.
+pub(crate) async fn wireguard_revalidate(id: Option<&str>) -> Result<usize, String> {
+    let controller = controller();
+    let ids: Vec<String> = match id.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(id) => vec![id.to_string()],
+        None => controller
+            .active
+            .lock()
+            .map_err(|_| "运行状态锁已损坏".to_string())?
+            .keys()
+            .cloned()
+            .collect(),
+    };
+    let mut checked = 0usize;
+    for id in ids {
+        // Stop signals are sent synchronously. Hold the lifecycle lock until
+        // recovery finishes so the service's Stop request runs afterward.
+        let _lifecycle = wireguard::TUNNEL_LIFECYCLE.lock().await;
+        let can_revalidate = controller
+            .active
+            .lock()
+            .map_err(|_| "运行状态锁已损坏".to_string())?
+            .get(&id)
+            .is_some_and(|active| active.stop.is_some());
+        if !can_revalidate || status_for(&controller, &id).state != ServiceState::Running {
+            continue;
+        }
+        let Ok(profile) = find_profile(&controller, &id) else {
+            continue;
+        };
+        if profile.kind != ProxyType::WireGuard {
+            continue;
+        }
+        let Some(config) = profile.wireguard.clone() else {
+            continue;
+        };
+        let Ok(private_key) = controller.secrets.get(&id, "wireguard", "private-key") else {
+            continue;
+        };
+        checked += 1;
+        if let Err(error) =
+            wireguard::revalidate(&id, &config, &private_key, wireguard::HelperMode::Existing).await
+        {
+            wireguard::log_event("health", &format!("{id}: 唤醒后重新下发配置失败: {error}"));
+        }
+    }
+    Ok(checked)
+}
+
 pub(crate) fn upgrade(weak: &Weak<AppController>) -> Result<Arc<AppController>, String> {
     weak.upgrade()
         .ok_or_else(|| "LocalProxy 已关闭".to_string())

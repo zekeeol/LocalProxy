@@ -130,6 +130,19 @@ async fn handle_request(request: IpcRequest) -> IpcResponse {
             ),
             _ => Err("缺少参数: id".to_string()),
         },
+        // Sent by the desktop shell after wake/unlock: verifies running
+        // WireGuard tunnels and re-applies their config if the handshake is
+        // gone. Never starts a new privileged helper, so no password prompt.
+        "wireguard_revalidate" => serialize_result(
+            local_proxy_rust::api::local_proxy::wireguard_revalidate(
+                request
+                    .params
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            )
+            .await,
+        ),
         "ping" => Ok(json!({ "pong": true })),
         "list_profiles" => serialize_result(local_proxy_rust::api::local_proxy::list_profiles()),
         "get_profile" => with_string(

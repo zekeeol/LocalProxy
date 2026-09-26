@@ -16,10 +16,88 @@ use crate::api::local_proxy::{
     SecretPatch, SecretPatchKind, WireGuardConfig, WireGuardPeer, WireGuardSetupResult,
     WireGuardStatus,
 };
+use crate::helper_paths;
 
-const HELPER_SOCKET: &str = "localproxy-wireguard.sock";
-const HELPER_PROTOCOL_VERSION: u32 = 2;
+/// Serializes helper starts inside this process.
 static HELPER_START: Mutex<()> = Mutex::const_new(());
+/// Orders wake recovery and user-initiated stop in the desktop core. The
+/// helper has its own mutation lock for requests from any client.
+pub(crate) static TUNNEL_LIFECYCLE: Mutex<()> = Mutex::const_new(());
+/// Health probe budget: three short attempts instead of one, so a helper that
+/// is busy running `ifconfig`/`route`/`networksetup` is not mistaken for a dead
+/// one (a false negative used to kill a working helper and re-prompt the user
+/// for the administrator password).
+const PROBE_ATTEMPTS: u32 = 3;
+const PROBE_TIMEOUT: Duration = Duration::from_millis(900);
+const PROBE_GAP: Duration = Duration::from_millis(150);
+/// Minimum stale-handshake threshold for peers with persistent keepalive.
+const HEALTHY_HANDSHAKE_AGE_SEC: u64 = 180;
+/// Consecutive 5 s supervisor ticks without a handshake before recovery.
+const UNHEALTHY_TICKS_BEFORE_RECOVERY: u32 = 3;
+/// Minimum time between two automatic recovery attempts.
+const RECOVERY_COOLDOWN: Duration = Duration::from_secs(60);
+/// Consecutive helper communication failures before the tunnel is stopped.
+const MAX_STATUS_FAILURES: u32 = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HelperMode {
+    /// May start the privileged helper, which costs the user an administrator
+    /// password prompt. Only used for explicit user actions.
+    Explicit,
+    /// Reuses a running helper only. Never starts a new one.
+    Existing,
+}
+
+/// Append one line to the helper lifecycle record. Logging never fails the
+/// caller: the tunnel state matters more than the log file.
+pub(crate) fn log_event(scope: &str, message: &str) {
+    let Some(path) = helper_paths::log_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if std::fs::metadata(&path).is_ok_and(|meta| meta.len() > 1_048_576) {
+        let _ = std::fs::rename(&path, path.with_extension("log.1"));
+    }
+    let line = format!("{} [{scope}] {message}\n", timestamp());
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
+/// UTC timestamp without pulling in a date-time dependency.
+fn timestamp() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default();
+    let days = (secs / 86_400) as i64;
+    let seconds_of_day = secs % 86_400;
+    // Howard Hinnant's civil-from-days algorithm.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_pivot = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_pivot + 2) / 5 + 1;
+    let month = month_pivot + if month_pivot < 10 { 3 } else { -9 };
+    let year = year + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        seconds_of_day / 3600,
+        (seconds_of_day % 3600) / 60,
+        seconds_of_day % 60
+    )
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct WireGuardCommand {
@@ -121,9 +199,7 @@ pub(crate) fn parse_config(raw: &str) -> Result<WireGuardConfig, String> {
             match key.as_str() {
                 "publickey" => peer.public_key = value.to_string(),
                 "endpoint" => parse_endpoint(value, peer)?,
-                "allowedips" => peer
-                    .allowed_ips
-                    .extend(split_values(value, |value| parse_cidr(value))?),
+                "allowedips" => peer.allowed_ips.extend(split_values(value, parse_cidr)?),
                 "persistentkeepalive" => {
                     let seconds = value.parse::<u16>().map_err(|_| {
                         format!(
@@ -150,9 +226,7 @@ pub(crate) fn parse_config(raw: &str) -> Result<WireGuardConfig, String> {
                     kind: SecretPatchKind::Set,
                 };
             }
-            "address" => config
-                .addresses
-                .extend(split_values(value, |value| parse_cidr(value))?),
+            "address" => config.addresses.extend(split_values(value, parse_cidr)?),
             "dns" => config.dns.extend(split_dns(value)?),
             "mtu" => {
                 let mtu = value
@@ -319,22 +393,24 @@ pub(crate) async fn run(
     stop: oneshot::Receiver<()>,
 ) -> Result<(), String> {
     validate(&config)?;
-    let mut helper_config = config.clone();
-    helper_config.private_key = SecretPatch {
-        name: "private_key".into(),
-        value: Some(private_key.clone()),
-        kind: SecretPatchKind::Set,
+    let helper_config = helper_config(&config, &private_key)?;
+    // Starting the profile is the only path allowed to *start* the privileged
+    // helper, i.e. the only path that can cost the user an admin password.
+    // Request authorization before taking the tunnel lifecycle lock so a
+    // pending password dialog cannot delay stopping another active profile.
+    ensure_helper(HelperMode::Explicit).await?;
+    let setup = {
+        let _lifecycle = TUNNEL_LIFECYCLE.lock().await;
+        setup_tunnel(&id, &helper_config, &private_key, HelperMode::Explicit).await?
     };
-    validate(&helper_config)?;
-    let setup = call_helper(WireGuardAction::Setup {
-        id: id.clone(),
-        config: helper_config,
-        private_key,
-    })
-    .await
-    .and_then(|value| {
-        serde_json::from_value::<WireGuardSetupResult>(value).map_err(|e| e.to_string())
-    })?;
+    log_event(
+        "tunnel",
+        &format!(
+            "{id}: 已就绪 {} → {:?}",
+            setup.interface_name,
+            describe_peers(&config)
+        ),
+    );
     if let Some(controller) = controller.upgrade() {
         super::set_running(
             &controller,
@@ -343,27 +419,199 @@ pub(crate) async fn run(
             Some("WireGuard utun 已就绪".into()),
         );
     }
+
     let mut stopped = stop;
+    let started_at = std::time::Instant::now();
+    let mut status_failures = 0u32;
+    let mut unhealthy_ticks = 0u32;
+    let mut recovery_attempts = 0u32;
+    let mut recovery_exhausted_logged = false;
+    let mut last_recovery = std::time::Instant::now() - RECOVERY_COOLDOWN;
+
     loop {
         tokio::select! {
             biased;
             _ = &mut stopped => break,
-            _ = sleep(Duration::from_secs(5)) => {
-                match call_helper(WireGuardAction::Status { id: id.clone() }).await {
-                    Ok(value) => {
-                        let status: Option<WireGuardStatus> =
-                            serde_json::from_value(value).map_err(|e| e.to_string())?;
-                        if status.is_none() {
-                            return Err("WireGuard helper 已失去该隧道".into());
-                        }
+            _ = sleep(Duration::from_secs(5)) => {}
+        }
+        // Read-only probe: this loop must never restart the helper, otherwise
+        // one slow `ifconfig` would kill a healthy tunnel and ask for the
+        // administrator password again.
+        match call_helper(
+            WireGuardAction::Status { id: id.clone() },
+            HelperMode::Existing,
+        )
+        .await
+        {
+            Ok(value) => {
+                status_failures = 0;
+                let status: Option<WireGuardStatus> =
+                    serde_json::from_value(value).map_err(|e| e.to_string())?;
+                let Some(status) = status else {
+                    // The helper is alive but no longer owns this tunnel. The
+                    // helper is already running, so re-applying the config
+                    // needs no new authorization.
+                    log_event(
+                        "tunnel",
+                        &format!("{id}: helper 已失去该隧道，重新下发配置"),
+                    );
+                    {
+                        let _lifecycle = TUNNEL_LIFECYCLE.lock().await;
+                        setup_tunnel(&id, &helper_config, &private_key, HelperMode::Existing)
+                            .await
+                            .map_err(|error| {
+                                format!("WireGuard helper 已失去该隧道，且重新下发失败: {error}")
+                            })?;
                     }
-                    Err(error) => return Err(format!("WireGuard helper 通信失败: {error}")),
+                    unhealthy_ticks = 0;
+                    continue;
+                };
+
+                if tunnel_has_handshake(&status) {
+                    unhealthy_ticks = 0;
+                    continue;
+                }
+
+                unhealthy_ticks += 1;
+                if unhealthy_ticks < UNHEALTHY_TICKS_BEFORE_RECOVERY {
+                    continue;
+                }
+                if started_at.elapsed() < Duration::from_secs(30) {
+                    // A fresh tunnel may legitimately have no handshake yet.
+                    continue;
+                }
+                if recovery_attempts >= 5 {
+                    if !recovery_exhausted_logged {
+                        recovery_exhausted_logged = true;
+                        log_event(
+                            "health",
+                            &format!("{id}: 自动恢复已达上限，请手动重启该配置"),
+                        );
+                    }
+                    continue;
+                }
+                if last_recovery.elapsed() < RECOVERY_COOLDOWN {
+                    continue;
+                }
+
+                recovery_attempts += 1;
+                recovery_exhausted_logged = false;
+                last_recovery = std::time::Instant::now();
+                unhealthy_ticks = 0;
+                log_event(
+                    "health",
+                    &format!(
+                        "{id}: {} 上握手信息过旧（{}），重新下发配置（第 {} 次）",
+                        status.interface_name,
+                        handshake_age_desc(&status),
+                        recovery_attempts
+                    ),
+                );
+                // Re-apply the configuration through the already-running
+                // helper: no relaunch, no password prompt.
+                let recovery = {
+                    let _lifecycle = TUNNEL_LIFECYCLE.lock().await;
+                    setup_tunnel(&id, &helper_config, &private_key, HelperMode::Existing).await
+                };
+                if let Err(error) = recovery {
+                    log_event("health", &format!("{id}: 重新下发配置失败: {error}"));
+                }
+            }
+            Err(error) => {
+                status_failures += 1;
+                log_event(
+                    "probe",
+                    &format!("{id}: helper 状态查询失败（第 {status_failures} 次）: {error}"),
+                );
+                if status_failures >= MAX_STATUS_FAILURES {
+                    return Err(format!("WireGuard helper 通信失败: {error}"));
                 }
             }
         }
     }
-    let _ = call_helper(WireGuardAction::Stop { id: id.clone() }).await;
+
+    {
+        let _lifecycle = TUNNEL_LIFECYCLE.lock().await;
+        let _ = call_helper(
+            WireGuardAction::Stop { id: id.clone() },
+            HelperMode::Existing,
+        )
+        .await;
+    }
+    log_event("tunnel", &format!("{id}: 已停止"));
     Ok(())
+}
+
+fn helper_config(config: &WireGuardConfig, private_key: &str) -> Result<WireGuardConfig, String> {
+    let mut helper_config = config.clone();
+    helper_config.private_key = SecretPatch {
+        name: "private_key".into(),
+        value: Some(private_key.to_string()),
+        kind: SecretPatchKind::Set,
+    };
+    validate(&helper_config)?;
+    Ok(helper_config)
+}
+
+async fn setup_tunnel(
+    id: &str,
+    helper_config: &WireGuardConfig,
+    private_key: &str,
+    mode: HelperMode,
+) -> Result<WireGuardSetupResult, String> {
+    call_helper(
+        WireGuardAction::Setup {
+            id: id.to_string(),
+            config: helper_config.clone(),
+            private_key: private_key.to_string(),
+        },
+        mode,
+    )
+    .await
+    .and_then(|value| {
+        serde_json::from_value::<WireGuardSetupResult>(value).map_err(|e| e.to_string())
+    })
+}
+
+fn describe_peers(config: &WireGuardConfig) -> String {
+    let peers: Vec<String> = config
+        .peers
+        .iter()
+        .map(|peer| format!("{}:{}", peer.endpoint_host, peer.endpoint_port))
+        .collect();
+    format!("{} peer(s): {}", peers.len(), peers.join(", "))
+}
+
+/// Without persistent keepalive, an idle WireGuard peer need not handshake at
+/// all. Only treat an old handshake as a failure for peers that are configured
+/// to send keepalives (and therefore should keep making progress while idle).
+fn tunnel_has_handshake(status: &WireGuardStatus) -> bool {
+    if status.peers.is_empty() {
+        return false;
+    }
+    let monitored: Vec<_> = status
+        .peers
+        .iter()
+        .filter(|peer| peer.persistent_keepalive.is_some_and(|seconds| seconds > 0))
+        .collect();
+    monitored.is_empty()
+        || monitored.iter().any(|peer| {
+            let keepalive = u64::from(peer.persistent_keepalive.unwrap_or_default());
+            let max_age = HEALTHY_HANDSHAKE_AGE_SEC.max(keepalive.saturating_mul(2) + 30);
+            peer.handshake_age_sec.is_some_and(|age| age <= max_age)
+        })
+}
+
+fn handshake_age_desc(status: &WireGuardStatus) -> String {
+    match status
+        .peers
+        .iter()
+        .filter_map(|peer| peer.handshake_age_sec)
+        .min()
+    {
+        Some(age) => format!("最近握手 {age} 秒前"),
+        None => "从未完成握手".to_string(),
+    }
 }
 
 pub(crate) fn endpoints(
@@ -388,26 +636,77 @@ pub(crate) fn endpoints(
 }
 
 pub(crate) async fn status(id: &str) -> Result<Option<WireGuardStatus>, String> {
-    let token = helper_token()?;
-    let value = call_existing(WireGuardAction::Status { id: id.into() }, token).await?;
+    // Bounded so the 5 s UI poll cannot pile up requests behind a busy helper.
+    let value = timeout(
+        Duration::from_secs(4),
+        call_helper(
+            WireGuardAction::Status { id: id.into() },
+            HelperMode::Existing,
+        ),
+    )
+    .await
+    .map_err(|_| "WireGuard 状态查询超时".to_string())??;
     serde_json::from_value(value).map_err(|error| format!("WireGuard 状态解析失败: {error}"))
 }
 
-async fn call_helper(action: WireGuardAction) -> Result<serde_json::Value, String> {
-    ensure_helper().await?;
-    timeout(Duration::from_secs(120), async move {
-        let token = helper_token()?;
-        call_with_token(action, token).await
-    })
+/// Re-applies the configuration of a running tunnel without starting a new
+/// helper, so a wake-up or a broken handshake can be recovered without asking
+/// for the administrator password again.
+pub(crate) async fn revalidate(
+    id: &str,
+    config: &WireGuardConfig,
+    private_key: &str,
+    mode: HelperMode,
+) -> Result<Option<WireGuardStatus>, String> {
+    let helper_config = helper_config(config, private_key)?;
+    let value = timeout(
+        Duration::from_secs(4),
+        call_helper(
+            WireGuardAction::Status { id: id.into() },
+            HelperMode::Existing,
+        ),
+    )
     .await
-    .map_err(|_| "WireGuard helper 响应超时".to_string())?
+    .map_err(|_| "WireGuard 状态查询超时".to_string())??;
+    let status: Option<WireGuardStatus> = serde_json::from_value(value)
+        .map_err(|error| format!("WireGuard 状态解析失败: {error}"))?;
+    let needs_refresh = match status.as_ref() {
+        None => true,
+        Some(status) => !tunnel_has_handshake(status),
+    };
+    if !needs_refresh {
+        return Ok(status);
+    }
+    log_event(
+        "health",
+        &format!(
+            "{id}: 唤醒后检查到隧道不可用（{}），重新下发配置",
+            status
+                .as_ref()
+                .map(handshake_age_desc)
+                .unwrap_or_else(|| "helper 未持有该隧道".into())
+        ),
+    );
+    setup_tunnel(id, &helper_config, private_key, mode).await?;
+    Ok(status)
+}
+
+async fn call_helper(
+    action: WireGuardAction,
+    mode: HelperMode,
+) -> Result<serde_json::Value, String> {
+    ensure_helper(mode).await?;
+    let token = helper_token()?;
+    timeout(Duration::from_secs(120), call_with_token(action, token))
+        .await
+        .map_err(|_| "WireGuard helper 响应超时".to_string())?
 }
 
 async fn call_with_token(
     action: WireGuardAction,
     token: String,
 ) -> Result<serde_json::Value, String> {
-    let socket = helper_socket_path();
+    let socket = helper_paths::socket_path();
     let stream = UnixStream::connect(&socket).await.map_err(|error| {
         format!("WireGuard helper 未运行。启动隧道时需要授权创建 utun 设备: {error}")
     })?;
@@ -429,9 +728,9 @@ async fn call_with_token(
         .await
         .map_err(|e| format!("关闭 WireGuard 指令通道失败: {e}"))?;
     let mut line = String::new();
-    reader
-        .read_line(&mut line)
+    timeout(Duration::from_secs(30), reader.read_line(&mut line))
         .await
+        .map_err(|_| "读取 WireGuard 结果超时".to_string())?
         .map_err(|e| format!("读取 WireGuard 结果失败: {e}"))?;
     let response: WireGuardResponse =
         serde_json::from_str(line.trim()).map_err(|e| format!("WireGuard 结果无效: {e}"))?;
@@ -439,14 +738,6 @@ async fn call_with_token(
         WireGuardResponse::Ok { result } => Ok(result),
         WireGuardResponse::Error { error } => Err(error),
     }
-}
-
-fn helper_socket_path() -> std::path::PathBuf {
-    // macOS marks the per-user temp directory with sunlnk, so chmod on it
-    // returns EPERM. Put the root helper socket in our own subdirectory.
-    std::env::temp_dir()
-        .join("localproxy-wireguard")
-        .join(HELPER_SOCKET)
 }
 
 fn helper_token() -> Result<String, String> {
@@ -477,37 +768,68 @@ fn helper_token_path() -> Result<std::path::PathBuf, String> {
         .ok_or_else(|| "无法确定 helper token 目录".to_string())
 }
 
-async fn ensure_helper() -> Result<(), String> {
+async fn ensure_helper(mode: HelperMode) -> Result<(), String> {
+    if helper_is_current().await {
+        return Ok(());
+    }
+    if mode == HelperMode::Existing {
+        // Never start the helper implicitly: that would raise an administrator
+        // password prompt behind the user's back.
+        return Err("WireGuard helper 未在运行（启动隧道需要管理员授权）".into());
+    }
+
     let _start_guard = HELPER_START.lock().await;
     if helper_is_current().await {
         return Ok(());
     }
-    // Ask any older helper to exit before replacing it. Shutdown exists in
-    // previous protocol versions, so this works even when Ping does not.
-    let _ = timeout(
-        Duration::from_millis(500),
-        call_existing(WireGuardAction::Shutdown, helper_token()?),
-    )
-    .await;
+    // Best effort: let a predecessor restore its own routes and DNS. If it does
+    // not answer, the new helper's single-instance lock takes over anyway.
+    if let Ok(token) = helper_token() {
+        let _ = timeout(
+            Duration::from_secs(1),
+            call_existing(WireGuardAction::Shutdown, token),
+        )
+        .await;
+    }
     let token = helper_token()?;
     launch_helper(&token).await
 }
 
+/// A helper counts as current only when it answers with our exact protocol
+/// version. Version 3 introduced the single-instance lock and full teardown, so
+/// an older helper is deliberately replaced instead of being reused.
 async fn helper_is_current() -> bool {
     let Ok(token) = helper_token() else {
         return false;
     };
-    match timeout(
-        Duration::from_millis(350),
-        call_existing(WireGuardAction::Ping, token),
-    )
-    .await
-    {
-        Ok(Ok(value)) => {
-            value.get("version").and_then(Value::as_u64) == Some(HELPER_PROTOCOL_VERSION.into())
+    for attempt in 0..PROBE_ATTEMPTS {
+        let probe = timeout(
+            PROBE_TIMEOUT,
+            call_existing(WireGuardAction::Ping, token.clone()),
+        )
+        .await;
+        // Failed attempts (including a timeout) are not logged here: callers
+        // poll every few seconds and would fill the log with one line per probe.
+        if let Ok(Ok(value)) = probe {
+            if value.get("version").and_then(Value::as_u64)
+                == Some(u64::from(helper_paths::HELPER_PROTOCOL_VERSION))
+            {
+                return true;
+            }
+            log_event(
+                "probe",
+                &format!(
+                    "helper 版本不符（期望 {}），将被替换",
+                    helper_paths::HELPER_PROTOCOL_VERSION
+                ),
+            );
+            return false;
         }
-        _ => false,
+        if attempt + 1 < PROBE_ATTEMPTS {
+            sleep(PROBE_GAP).await;
+        }
     }
+    false
 }
 
 async fn call_existing(
@@ -519,23 +841,34 @@ async fn call_existing(
 
 async fn launch_helper(token: &str) -> Result<(), String> {
     let helper = helper_binary_path()?;
-    let socket = helper_socket_path();
+    let socket = helper_paths::socket_path();
+    let pid_file = helper_paths::pid_path();
     let parent = socket.parent().ok_or("WireGuard socket 路径无效")?;
-    std::fs::create_dir_all(&parent).map_err(|e| format!("创建 helper 目录失败: {e}"))?;
+    std::fs::create_dir_all(parent).map_err(|e| format!("创建 helper 目录失败: {e}"))?;
     use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700))
+    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
         .map_err(|e| format!("设置 helper 目录权限失败: {e}"))?;
-    let _ = std::fs::remove_file(&socket);
-    let socket_pattern = shell_quote(&format!(
-        "local_proxy_wireguard_helper --socket {}",
-        socket.to_string_lossy()
-    ));
+
+    // The socket file is deliberately left untouched here: the helper replaces
+    // it itself, after taking the single-instance lock and reaping any
+    // predecessor. Removing it here is exactly what used to orphan the old
+    // helper and leak its utun device.
+    let previous = std::fs::read_to_string(&pid_file)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     let script = format!(
-        "do shell script \"pkill -f {} >/dev/null 2>&1 || true; {} --socket {} --token {} >/dev/null 2>&1 &\" with administrator privileges",
-        socket_pattern,
+        "do shell script \"{} --socket {} --token {} >/dev/null 2>&1 &\" with administrator privileges",
         shell_quote(&helper.to_string_lossy()),
         shell_quote(&socket.to_string_lossy()),
         token,
+    );
+    log_event(
+        "launch",
+        &format!(
+            "请求启动 helper（替换 pid={}）",
+            previous.clone().unwrap_or_else(|| "无".into())
+        ),
     );
     let output = tokio::process::Command::new("/usr/bin/osascript")
         .arg("-e")
@@ -545,22 +878,36 @@ async fn launch_helper(token: &str) -> Result<(), String> {
         .map_err(|e| format!("无法请求管理员权限: {e}"))?;
     if !output.status.success() {
         let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(format!(
-            "WireGuard helper 启动失败: {}",
-            if message.is_empty() {
-                "用户拒绝授权".into()
-            } else {
-                message
-            }
-        ));
+        let reason = if message.is_empty() {
+            "用户拒绝授权".to_string()
+        } else {
+            message
+        };
+        log_event("launch", &format!("helper 启动失败: {reason}"));
+        return Err(format!("WireGuard helper 启动失败: {reason}"));
     }
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+
+    // Confirm the new helper is the one answering, with the expected protocol.
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
     while std::time::Instant::now() < deadline {
-        if socket.exists() {
+        if socket.exists() && helper_is_current().await {
+            let pid = std::fs::read_to_string(&pid_file)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            log_event(
+                "launch",
+                &format!(
+                    "helper 就绪 pid={}（替换 pid={}）",
+                    if pid.is_empty() { "未知".into() } else { pid },
+                    previous.unwrap_or_else(|| "无".into())
+                ),
+            );
             return Ok(());
         }
-        sleep(Duration::from_millis(80)).await;
+        sleep(Duration::from_millis(200)).await;
     }
+    log_event("launch", "helper 启动超时（socket 未就绪或版本不符）");
     Err("WireGuard helper 启动超时".into())
 }
 
@@ -623,5 +970,98 @@ PersistentKeepalive = 25
         assert!(parse_config("[Interface]\nAddress=192.168.1.6/32\n").is_err());
         let bad = SAMPLE.replace("172.16.110.0/24,172.31.0.2/32", "0.0.0.0/0");
         assert!(parse_config(&bad).is_err());
+    }
+
+    fn status_with(ages: Vec<Option<u64>>, keepalive: Option<u16>) -> WireGuardStatus {
+        WireGuardStatus {
+            interface_name: "utun9".into(),
+            listen_port: 0,
+            public_key: None,
+            peers: ages
+                .into_iter()
+                .map(|age| crate::api::local_proxy::WireGuardPeerStatus {
+                    public_key: "key".into(),
+                    endpoint: None,
+                    allowed_ips: Vec::new(),
+                    persistent_keepalive: keepalive,
+                    handshake_age_sec: age,
+                    rx_bytes: 0,
+                    tx_bytes: 0,
+                })
+                .collect(),
+        }
+    }
+
+    /// Only peers expected to send traffic while idle need a recent handshake.
+    #[test]
+    fn health_requires_a_recent_handshake() {
+        assert!(tunnel_has_handshake(&status_with(vec![Some(5)], Some(25))));
+        assert!(tunnel_has_handshake(&status_with(
+            vec![None, Some(HEALTHY_HANDSHAKE_AGE_SEC)],
+            Some(25)
+        )));
+        assert!(!tunnel_has_handshake(&status_with(
+            vec![Some(HEALTHY_HANDSHAKE_AGE_SEC + 1)],
+            Some(25)
+        )));
+        assert!(!tunnel_has_handshake(&status_with(vec![None], Some(25))));
+        assert!(!tunnel_has_handshake(&status_with(
+            vec![None, Some(600)],
+            Some(25)
+        )));
+        assert!(tunnel_has_handshake(&status_with(vec![None], None)));
+        assert!(tunnel_has_handshake(&status_with(vec![Some(600)], Some(0))));
+        assert!(tunnel_has_handshake(&status_with(
+            vec![Some(500)],
+            Some(300)
+        )));
+        assert!(!tunnel_has_handshake(&status_with(
+            vec![Some(631)],
+            Some(300)
+        )));
+        assert_eq!(
+            handshake_age_desc(&status_with(vec![None], Some(25))),
+            "从未完成握手"
+        );
+        assert_eq!(
+            handshake_age_desc(&status_with(vec![Some(42)], Some(25))),
+            "最近握手 42 秒前"
+        );
+    }
+
+    #[test]
+    fn timestamp_is_utc_iso8601() {
+        let stamp = timestamp();
+        assert_eq!(stamp.len(), 20, "unexpected timestamp: {stamp}");
+        assert!(stamp.ends_with('Z'));
+        assert!(stamp.starts_with("20"));
+        assert!(stamp.contains('T'));
+    }
+
+    #[test]
+    fn helper_config_carries_the_private_key_patch() {
+        const KEY: &str = "TYjv11EHGusEY8Y/8Lt4kTMEnmIxUsGLI0ZBqhzmi6A=";
+        let config = parse_config(SAMPLE).unwrap();
+        let patched = helper_config(&config, KEY).unwrap();
+        assert_eq!(patched.private_key.value.as_deref(), Some(KEY));
+        assert_eq!(patched.private_key.kind, SecretPatchKind::Set);
+    }
+
+    #[test]
+    fn helper_paths_agree_with_the_helper_side() {
+        // The helper derives its pid/lock files from --socket, so the socket
+        // path must be the parent of both.
+        let socket = helper_paths::socket_path();
+        assert_eq!(
+            socket.file_name().unwrap(),
+            helper_paths::HELPER_SOCKET_FILE
+        );
+        assert_eq!(
+            helper_paths::sibling(&socket, helper_paths::HELPER_PID_FILE),
+            helper_paths::pid_path()
+        );
+        // The helper refuses a client whose protocol version it does not match,
+        // so the takeover guarantees must stay paired with a version bump.
+        const { assert!(helper_paths::HELPER_PROTOCOL_VERSION >= 3) };
     }
 }

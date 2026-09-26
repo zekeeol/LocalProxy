@@ -17,7 +17,10 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 bytes = "1"
 base64 = "0.22"
 boringtun = { version = "0.7.1", features = ["device"] }
-ctrlc = "3"
+# `termination` makes the helper's cleanup handler run for SIGTERM/SIGHUP too
+# (e.g. when the launcher reaps a stale helper), so routes/DNS are restored
+# instead of being leaked by the default signal disposition.
+ctrlc = { version = "3", features = ["termination"] }
 dirs = "6"
 futures-util = "0.3"
 http-body-util = "0.1"

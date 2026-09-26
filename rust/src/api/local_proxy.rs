@@ -356,3 +356,9 @@ pub fn parse_wstunnel_command(command: String) -> Result<WstunnelConfig, String>
 pub async fn wireguard_status(id: String) -> Result<Option<WireGuardStatus>, String> {
     core::wireguard_status(&id).await
 }
+
+/// Post-wake/unlock health check for running WireGuard tunnels. `id` is
+/// optional: without it every active WireGuard profile is checked.
+pub async fn wireguard_revalidate(id: Option<String>) -> Result<usize, String> {
+    core::wireguard_revalidate(id.as_deref()).await
+}
