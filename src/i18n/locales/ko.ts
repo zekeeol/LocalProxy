@@ -144,6 +144,8 @@ const ko: TranslationDict = {
     tlsVerify: 'TLS 인증서 검증',
     tlsOffNote: '사용 안 함 (원본 명령과 동일)',
     actualInterface: '실제 인터페이스',
+    statusMayBeStale: '상태가 오래되었을 수 있습니다. 다시 시도 중',
+    carrierMissing: '로컬 UDP 전송 포트 {{endpoint}}가 수신 중이 아닙니다. wstunnel 또는 전송 터널을 확인하세요.',
     shownAfterStart: '시작 후 표시',
     localPublicKey: '로컬 공개 키',
     peerKey: '피어 {{key}}',

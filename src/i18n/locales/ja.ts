@@ -144,6 +144,8 @@ const ja: TranslationDict = {
     tlsVerify: 'TLS 証明書検証',
     tlsOffNote: '無効（元のコマンドと同じ）',
     actualInterface: '実際のインターフェース',
+    statusMayBeStale: '状態が古い可能性があります。再試行中',
+    carrierMissing: 'ローカル UDP 搬送ポート {{endpoint}} が待ち受けていません。wstunnel または搬送トンネルを確認してください。',
     shownAfterStart: '起動後に表示',
     localPublicKey: 'ローカル公開鍵',
     peerKey: 'ピア {{key}}',

@@ -142,6 +142,8 @@ const en = {
     tlsVerify: 'TLS certificate verification',
     tlsOffNote: 'Disabled (matches the original command)',
     actualInterface: 'Actual interface',
+    statusMayBeStale: 'Status may be outdated; retrying',
+    carrierMissing: 'Local UDP carrier {{endpoint}} is not listening. Check wstunnel or the transport tunnel.',
     shownAfterStart: 'Shown after start',
     localPublicKey: 'Local public key',
     peerKey: 'Peer {{key}}',

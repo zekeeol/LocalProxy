@@ -211,21 +211,20 @@ helper 启动后做两件事：
 ### 5.6 唤醒 / 解锁后自愈（修 R5）
 
 - `electron/main.ts` 订阅 `powerMonitor` 的 `resume` 与 `unlock-screen`，延迟 3 秒发送新的 RPC `wireguard_revalidate`；
-- 核心 `core::wireguard_revalidate()`：遍历**当前活跃的 WireGuard profile**（或指定 id），用 `helper::revalidate()` 检查 `handshake_age_sec`；
-  - 配置了 `PersistentKeepalive` 的 peer 有近期握手，或未配置 keepalive 的隧道处于正常空闲状态 → 什么都不做；
-  - 不健康 / helper 已丢失该隧道 → 通过**已运行的 helper** 重新 `Setup`（不再弹密码）；
-- 守护循环只对配置了 `PersistentKeepalive` 的 peer 按握手新鲜度判断；连续 3 个周期（15 秒）没有新握手、且隧道已运行超过 30 秒时，自动重新下发配置，带 60 秒冷却、最多 5 次，达到上限后写日志提示手动重启；
+- 核心 `core::wireguard_revalidate()`：遍历运行中的 WireGuard profile。唤醒时有 keepalive 的 peer 若握手过旧，或没有 keepalive 的 peer 无法通过空闲握手判断健康，就通过 helper 的 `Refresh` 指令重发 UAPI 配置，保留 utun、路由和 DNS；配置变更或 helper 已丢失隧道时才完整 `Setup`。
+- 守护循环只对配置了 `PersistentKeepalive` 的 peer 按握手新鲜度判断；连续 3 个周期（15 秒）没有新握手、且隧道已运行超过 30 秒时，先 `Refresh`，等待 20 秒仍无握手才重建设备。重建间隔至少 60 秒；连续 5 次后降为每 5 分钟尝试一次，握手恢复后重置计数。
+- 连续 3 次重建后，如果 Endpoint 指向 localhost，核心通过 `lsof` 检查对应 UDP 承载端口（排除 WireGuard helper 本身的 socket）。端口未监听时暂停无效的 wg 重建，在详情面板和运行日志中提示检查 wstunnel 或其他承载隧道。
 - 隧道状态为 `present` 但 helper 丢失隧道时，守护循环会先尝试用 `Existing` 模式重新下发配置，而不是立刻把隧道判死。
 
 ### 5.7 结构化记录（直接对应“感觉需要记录”）
 
-日志文件：`~/Library/Application Support/LocalProxy/wireguard-helper.log`（超过 1 MiB 轮转为 `wireguard-helper.log.1`）。
+核心日志：`~/Library/Application Support/LocalProxy/wireguard-helper.log`。root helper 的路由、接口地址和 DNS 操作日志：`/var/log/localproxy-wireguard.log`。两者超过 1 MiB 都轮转为 `.1`，不会记录私钥或 helper token。
 
 ```text
 2026-09-24T15:11:03Z [launch] 请求启动 helper（替换 pid=无）
 2026-09-24T15:11:08Z [launch] helper 就绪 pid=30228（替换 pid=无）
 2026-09-24T15:11:09Z [tunnel] 3f2c…: 已就绪 utun9 → 1 peer(s): localhost:50814
-2026-09-24T15:24:10Z [health] 3f2c…: utun9 上握手信息过旧（从未完成握手），重新下发配置（第 1 次）
+2026-09-24T15:24:10Z [health] 3f2c…: 在 utun9 上重新下发 peer，等待握手
 2026-09-24T15:25:11Z [probe]  3f2c…: helper 状态查询失败（第 1 次）: WireGuard helper 未在运行…
 2026-09-24T15:26:02Z [tunnel] 3f2c…: 已停止
 ```
@@ -239,10 +238,11 @@ helper 是 root 进程，而它的 socket 与 token 都位于用户会话可读�
 ## 6. 验证
 
 ```bash
-cargo test --manifest-path rust/Cargo.toml          # 41 个测试，含新增的 11 个
+cargo test --manifest-path rust/Cargo.toml          # 当前 43 个测试
 cargo clippy --manifest-path rust/Cargo.toml --all-targets -- -D warnings
 cargo build --release --manifest-path rust/Cargo.toml
 npm run lint && npm run build:electron
+npm run build:mac:adhoc                         # 生成 ad hoc 签名的 arm64 DMG
 ```
 
 新增的回归测试覆盖（helper 侧校验、单实例锁、路由/DNS 归属、健康阈值等）：单实例锁互斥、pid 文件里是死进程时仍能接管、锁被占用时给出“单实例”错误、路由 family/kind 推导、地址族映射、DNS 归属比较（忽略顺序与大小写）、健康判定阈值、时间戳格式、helper 与核心的 pid/lock 路径一致。
@@ -254,16 +254,6 @@ npm run lint && npm run build:electron
 3. 反复停止/启动同一 profile 5 次，`pgrep -fl local_proxy_wireguard_helper | wc -l` 应恒为 1（macOS 的 pgrep 没有 `-c`），`ifconfig | grep -c 192.168.1.6` 不应增长；
 4. `sudo kill -TERM $(cat $TMPDIR/localproxy-wireguard/localproxy-wireguard.pid)`：确认 `netstat -rn` 里该隧道的路由与 `networksetup -getdnsservers` 的 DNS 都已回退。
 
-## 7. 仍未解决 / 可选的后续工作
+## 7. 尚需正式签名的工作
 
-按“收益 ÷ 成本”排序：
-
-1. **P2：`SMAppService` + LaunchDaemon/XPC**（根治密码弹窗）。当前除了“首次启动 profile”之外都不再触发授权，但 helper 与 App 生命周期仍不一致：helper 会常驻到系统重启，且彻底退出后下一次启动仍要一次密码。挂到 launchd 后这两点都消失。
-2. **恢复路径不要重建设备**：现在 `Setup` 一律「拆掉旧 tunnel → 新建 utun → 重配地址/路由/DNS」。锁屏自愈时其实可以只重发一次 UAPI `set=1`（重新武装 peer、触发新的握手），只有配置真的变了或第二次仍不健康时才重建 —— 能避免自愈本身造成的接口抖动与 DNS/路由 churn。
-3. **自愈次数上限后的行为**：每个 tunnel 生命周期最多自动恢复 5 次，之后只写日志（唤醒路径仍会单独尝试）。可以改成“之后每 5 分钟静默重试一次”，或者把状态上报到 UI 让用户点一下。
-4. **承载隧道不在自愈范围内**：示例里 WireGuard 的 Endpoint 是 `localhost:50814`，真正的传输是 wstunnel（或 SSH）。如果那一条挂了，wg 侧无论重下发多少次都不会有握手。建议在 “连续 N 次恢复失败” 时就检查该 profile 依赖的本地端口是否仍在监听，并在 UI/日志里明确提示“请检查承载隧道”，而不是只报 wg 不健康。
-5. **UI 的瞬时假离线**：`wireguard_status` 现在有 4 秒超时，helper 忙时轮询失败会把 `wgStatus` 置为 `null`（`src/App.tsx` 的 catch）。可以保留上一次状态并标记「数据可能过期」。顺带一提，peer 的握手/rx/tx 已经在详情面板里显示了（`handshake_age_sec` / `rx_bytes` / `tx_bytes`），只差一个整体健康度提示。
-6. **日志可再补上下文**：现在记了 `id → utunN`、暂停/恢复、探测失败；可以再把每条路由/DNS 的施加与回滚结果写进去，便于复盘这一类“归属判断”问题。
-7. **R7 的最终原因未定**：新版不再依赖 `pkill -f`，已不阻塞；如需复盘历史现场，仍要一次 `sudo kill -TERM <pids>` 来区分“旧构建未执行 pkill”与“管理员路径进程不吃 SIGTERM”。
-8. **R6（多个设备抢同一 peer）**：单实例后同一时刻只有一个设备持有该地址，风险自然消失；如果以后允许同一份 wg 配置被多个 profile 复用，需要重新评估。
-9. **helper 空闲退出策略**：目前 helper 会一直常驻（这是“不再反复要密码”的代价）。可考虑给用户一个开关：退出 App 时一并结束 helper（更干净、但要重新授权），或保留常驻（现状）。
+`SMAppService` + LaunchDaemon/XPC 仍未接入。当前机器没有 Apple 代码签名证书，应用只使用 ad hoc 签名。Apple 的 [Service Management 文档](https://developer.apple.com/documentation/servicemanagement/smappservice)说明 daemon 由主应用注册，并且需要管理员在系统设置中批准；Apple DTS 还指出主应用和嵌入 helper 应由同一 Apple 签名身份签名，ad hoc 签名会导致后台运行不可靠（[讨论](https://developer.apple.com/forums/thread/799910)）。因此当前仍在首次显式启动 WireGuard profile 时请求一次管理员授权，helper 仍可常驻到系统重启。拿到 Developer ID 后，需要把 daemon 放入应用包、增加 `Contents/Library/LaunchDaemons` plist、实现独立于用户临时目录的 XPC 控制通道，再做签名、系统批准和开机重启验证。

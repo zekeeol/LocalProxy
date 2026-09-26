@@ -31,7 +31,7 @@ use base64::Engine;
 use boringtun::device::{DeviceConfig, DeviceHandle};
 use boringtun::x25519::{PublicKey, StaticSecret};
 use local_proxy_rust::helper_paths;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 /// Grace period given to a predecessor helper after `SIGTERM` before `SIGKILL`.
@@ -40,10 +40,33 @@ const TAKEOVER_TERM_GRACE: Duration = Duration::from_secs(3);
 const TAKEOVER_LOCK_WAIT: Duration = Duration::from_secs(3);
 /// Poll interval while waiting for the predecessor to release the lock.
 const TAKEOVER_POLL: Duration = Duration::from_millis(100);
+const AUDIT_LOG: &str = "/var/log/localproxy-wireguard.log";
 /// Setup, Stop and Shutdown all modify the same routes, DNS and device table.
 /// Keep them ordered without blocking Ping or a status read.
 static TUNNEL_MUTATION: Mutex<()> = Mutex::new(());
 static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+
+/// Root-owned operational log. Never includes keys or the helper token.
+fn audit(scope: &str, message: &str) {
+    if std::fs::metadata(AUDIT_LOG).is_ok_and(|meta| meta.len() > 1_048_576) {
+        let _ = std::fs::rename(AUDIT_LOG, format!("{AUDIT_LOG}.1"));
+    }
+    let mut file = match OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o644)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(AUDIT_LOG)
+    {
+        Ok(file) => file,
+        Err(_) => return,
+    };
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|time| time.as_secs())
+        .unwrap_or_default();
+    let _ = writeln!(file, "{stamp} [{scope}] {message}");
+}
 
 #[derive(Debug, Deserialize)]
 struct Command {
@@ -60,6 +83,11 @@ enum Action {
         config: WireGuardConfig,
         private_key: String,
     },
+    Refresh {
+        id: String,
+        config: WireGuardConfig,
+        private_key: String,
+    },
     Stop {
         id: String,
     },
@@ -70,7 +98,7 @@ enum Action {
     Shutdown,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct WireGuardConfig {
     addresses: Vec<String>,
     #[serde(default)]
@@ -82,7 +110,7 @@ struct WireGuardConfig {
     peers: Vec<WireGuardPeer>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct WireGuardPeer {
     public_key: String,
     endpoint_host: String,
@@ -121,6 +149,7 @@ struct ActiveTunnel {
     dns_service: Option<String>,
     previous_dns: Option<Vec<String>>,
     applied_dns: Vec<String>,
+    config: WireGuardConfig,
 }
 
 /// Small snapshot of a tunnel that can be inspected without holding the lock.
@@ -464,6 +493,39 @@ async fn handle_command(
             })
             .await
         }
+        Action::Refresh {
+            id,
+            config,
+            private_key,
+        } => {
+            let tunnels = tunnels.clone();
+            run_blocking(move || {
+                let _mutation = TUNNEL_MUTATION
+                    .lock()
+                    .map_err(|_| "mutation lock".to_string())?;
+                if SHUTTING_DOWN.load(Ordering::SeqCst) {
+                    return Err("WireGuard helper 正在退出".into());
+                }
+                validate_config(&config, &private_key)?;
+                let public_key = public_key_for_private(&private_key)?;
+                let interface = {
+                    let guard = tunnels.lock().map_err(|_| "tunnel lock".to_string())?;
+                    let Some(tunnel) = guard.get(&id) else {
+                        return Ok(json!({ "result": { "needs_rebuild": true } }));
+                    };
+                    if tunnel.config != config
+                        || tunnel.public_key.as_deref() != Some(public_key.as_str())
+                    {
+                        return Ok(json!({ "result": { "needs_rebuild": true } }));
+                    }
+                    tunnel.interface_name.clone()
+                };
+                let request = build_uapi_request(&config, &private_key)?;
+                send_uapi(&interface_socket_path(&interface), &request)?;
+                Ok(json!({ "result": { "needs_rebuild": false } }))
+            })
+            .await
+        }
         Action::Status { id } => {
             let tunnels = tunnels.clone();
             run_blocking(move || {
@@ -619,34 +681,7 @@ fn setup_tunnel(config: &WireGuardConfig, private_key: String) -> Result<ActiveT
         .trim()
         .to_string();
 
-    let mut set_request = String::from("set=1\n");
-    set_config(&mut set_request, "private_key", &hex(&secret.to_bytes()))?;
-    if let Some(port) = config.listen_port {
-        set_config(&mut set_request, "listen_port", &port.to_string())?;
-    }
-    set_config(&mut set_request, "replace_peers", "true")?;
-    for peer in &config.peers {
-        let endpoint = resolve_endpoint(&peer.endpoint_host, peer.endpoint_port)?;
-        set_config(
-            &mut set_request,
-            "public_key",
-            &hex(&decode_key(&peer.public_key)?),
-        )?;
-        set_config(&mut set_request, "endpoint", &endpoint.to_string())?;
-        for allowed_ip in &peer.allowed_ips {
-            set_config(&mut set_request, "allowed_ip", allowed_ip)?;
-        }
-        if let Some(keepalive) = peer.persistent_keepalive {
-            set_config(
-                &mut set_request,
-                "persistent_keepalive_interval",
-                &keepalive.to_string(),
-            )?;
-        }
-    }
-    // A final blank line commits the last peer; a root-level replace_peers
-    // line after a peer is not valid UAPI syntax.
-    set_request.push('\n');
+    let set_request = build_uapi_request(config, &private_key)?;
     send_uapi(&interface_socket_path(&interface_name), &set_request)?;
 
     let mut addresses = Vec::new();
@@ -697,6 +732,7 @@ fn setup_tunnel(config: &WireGuardConfig, private_key: String) -> Result<ActiveT
             dns_service,
             previous_dns,
             applied_dns,
+            config: config.clone(),
         };
         cleanup_tunnel(&tunnel);
         return Err(error);
@@ -714,7 +750,49 @@ fn setup_tunnel(config: &WireGuardConfig, private_key: String) -> Result<ActiveT
         dns_service,
         previous_dns,
         applied_dns,
+        config: config.clone(),
     })
+}
+
+fn public_key_for_private(private_key: &str) -> Result<String, String> {
+    let secret = StaticSecret::from(decode_key(private_key)?);
+    Ok(base64::engine::general_purpose::STANDARD.encode(PublicKey::from(&secret).as_bytes()))
+}
+
+fn build_uapi_request(config: &WireGuardConfig, private_key: &str) -> Result<String, String> {
+    let mut set_request = String::from("set=1\n");
+    set_config(
+        &mut set_request,
+        "private_key",
+        &hex(&decode_key(private_key)?),
+    )?;
+    if let Some(port) = config.listen_port {
+        set_config(&mut set_request, "listen_port", &port.to_string())?;
+    }
+    set_config(&mut set_request, "replace_peers", "true")?;
+    for peer in &config.peers {
+        let endpoint = resolve_endpoint(&peer.endpoint_host, peer.endpoint_port)?;
+        set_config(
+            &mut set_request,
+            "public_key",
+            &hex(&decode_key(&peer.public_key)?),
+        )?;
+        set_config(&mut set_request, "endpoint", &endpoint.to_string())?;
+        for allowed_ip in &peer.allowed_ips {
+            set_config(&mut set_request, "allowed_ip", allowed_ip)?;
+        }
+        if let Some(keepalive) = peer.persistent_keepalive {
+            set_config(
+                &mut set_request,
+                "persistent_keepalive_interval",
+                &keepalive.to_string(),
+            )?;
+        }
+    }
+    // A final blank line commits the last peer; a root-level replace_peers
+    // line after a peer is not valid UAPI syntax.
+    set_request.push('\n');
+    Ok(set_request)
 }
 
 fn set_config(request: &mut String, key: &str, value: &str) -> Result<(), String> {
@@ -933,7 +1011,20 @@ fn add_route(
     // An existing route may belong to another VPN or to the user. A route
     // lookup cannot distinguish it from a stale LocalProxy route, so never
     // remove it as a side effect of starting this tunnel.
-    route_add(&entry).map_err(|error| format!("无法添加路由 {}: {error}", entry.target))?;
+    if let Err(error) = route_add(&entry) {
+        audit(
+            "route",
+            &format!(
+                "add {} via {} failed: {error}",
+                entry.target, entry.interface
+            ),
+        );
+        return Err(format!("无法添加路由 {}: {error}", entry.target));
+    }
+    audit(
+        "route",
+        &format!("add {} via {} ok", entry.target, entry.interface),
+    );
     routes.push(entry);
     Ok(())
 }
@@ -951,13 +1042,6 @@ fn route_add(entry: &RouteEntry) -> Result<(), String> {
             &entry.interface,
         ],
     )
-}
-
-fn delete_route_plain(entry: &RouteEntry) {
-    let _ = run_command(
-        "/sbin/route",
-        &["-n", "delete", entry.family, entry.kind, &entry.target],
-    );
 }
 
 /// Removes only the route this helper installed: the qualified delete only
@@ -978,12 +1062,31 @@ fn delete_route(route: &RouteEntry) {
         ],
     );
     if qualified.is_ok() {
+        audit(
+            "route",
+            &format!("delete {} via {} ok", route.target, route.interface),
+        );
         return;
     }
     if route_interface(&route.probe).as_deref() != Some(route.interface.as_str()) {
+        audit(
+            "route",
+            &format!("delete {} skipped: route belongs elsewhere", route.target),
+        );
         return;
     }
-    delete_route_plain(route);
+    let result = run_command(
+        "/sbin/route",
+        &["-n", "delete", route.family, route.kind, &route.target],
+    );
+    audit(
+        "route",
+        &format!(
+            "delete {} fallback: {}",
+            route.target,
+            result.as_ref().map(|_| "ok").unwrap_or("failed")
+        ),
+    );
 }
 
 /// Interface currently owning the route for `address`, if any.
@@ -1012,7 +1115,7 @@ fn configure_interface_address(interface_name: &str, cidr: &str) -> Result<(), S
     let is_ipv4 = address
         .parse::<std::net::IpAddr>()
         .is_ok_and(|ip| ip.is_ipv4());
-    if is_ipv4 {
+    let result = if is_ipv4 {
         run_command(
             "/sbin/ifconfig",
             &[interface_name, "inet", address, address, "alias", "up"],
@@ -1022,13 +1125,29 @@ fn configure_interface_address(interface_name: &str, cidr: &str) -> Result<(), S
             "/sbin/ifconfig",
             &[interface_name, "inet6", address, "prefixlen", prefix, "up"],
         )
-    }
+    };
+    audit(
+        "address",
+        &format!(
+            "add {cidr} on {interface_name}: {}",
+            result.as_ref().map(|_| "ok").unwrap_or("failed")
+        ),
+    );
+    result
 }
 
 fn remove_interface_address(interface_name: &str, entry: &AddressEntry) {
-    let _ = run_command(
+    let result = run_command(
         "/sbin/ifconfig",
         &[interface_name, entry.family, &entry.address, "delete"],
+    );
+    audit(
+        "address",
+        &format!(
+            "delete {} on {interface_name}: {}",
+            entry.address,
+            result.as_ref().map(|_| "ok").unwrap_or("failed")
+        ),
     );
 }
 
@@ -1054,10 +1173,19 @@ fn first_network_service() -> Result<String, String> {
 fn configure_dns(service: &str, servers: &[String]) -> Result<(), String> {
     let mut args = vec!["-setdnsservers".to_string(), service.to_string()];
     args.extend(servers.iter().cloned());
-    run_command(
+    let result = run_command(
         "/usr/sbin/networksetup",
         &args.iter().map(String::as_str).collect::<Vec<_>>(),
-    )
+    );
+    audit(
+        "dns",
+        &format!(
+            "set {service} to {}: {}",
+            servers.join(","),
+            result.as_ref().map(|_| "ok").unwrap_or("failed")
+        ),
+    );
+    result
 }
 
 fn read_dns(service: &str) -> Result<Option<Vec<String>>, String> {
@@ -1102,16 +1230,34 @@ fn restore_dns_if_owned(tunnel: &ActiveTunnel) {
     };
     let current = normalize_dns(&read_dns(service).ok().flatten().unwrap_or_default());
     if current != normalize_dns(&tunnel.applied_dns) {
+        audit(
+            "dns",
+            &format!("restore {service} skipped: current value changed"),
+        );
         return;
     }
     match tunnel.previous_dns.as_ref() {
         Some(dns) if !dns.is_empty() => {
-            let _ = configure_dns(service, dns);
+            let result = configure_dns(service, dns);
+            audit(
+                "dns",
+                &format!(
+                    "restore {service}: {}",
+                    result.as_ref().map(|_| "ok").unwrap_or("failed")
+                ),
+            );
         }
         _ => {
-            let _ = run_command(
+            let result = run_command(
                 "/usr/sbin/networksetup",
                 &["-setdnsservers", service, "empty"],
+            );
+            audit(
+                "dns",
+                &format!(
+                    "restore {service} to automatic: {}",
+                    result.as_ref().map(|_| "ok").unwrap_or("failed")
+                ),
             );
         }
     }
@@ -1264,6 +1410,17 @@ mod tests {
     fn validation_accepts_a_realistic_request() {
         let config = config_of(valid_config());
         assert!(validate_config(&config, PRIVATE_KEY).is_ok());
+    }
+
+    #[test]
+    fn refresh_uses_peer_only_uapi_request() {
+        let config = config_of(valid_config());
+        let request = build_uapi_request(&config, PRIVATE_KEY).unwrap();
+        assert!(request.starts_with("set=1\nprivate_key="));
+        assert!(request.contains("replace_peers=true\n"));
+        assert!(request.contains("persistent_keepalive_interval=25\n"));
+        assert!(request.ends_with("\n\n"));
+        assert!(request.contains("allowed_ip=172.16.110.0/24\n"));
     }
 
     #[test]

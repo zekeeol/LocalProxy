@@ -144,6 +144,8 @@ const zh: TranslationDict = {
     tlsVerify: 'TLS 证书校验',
     tlsOffNote: '未启用（与原命令一致）',
     actualInterface: '实际接口',
+    statusMayBeStale: '状态可能已过期，正在重试',
+    carrierMissing: '本地 UDP 承载端口 {{endpoint}} 未监听，请检查 wstunnel 或承载隧道',
     shownAfterStart: '启动后显示',
     localPublicKey: '本机公钥',
     peerKey: '对端 {{key}}',

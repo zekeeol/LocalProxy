@@ -63,7 +63,11 @@ function forwardRustEvents(): void {
  * already running, so this never triggers an administrator password prompt.
  */
 function registerPowerHandlers(): void {
+  let lastCheck = 0;
   const recheck = (reason: string): void => {
+    const now = Date.now();
+    if (now - lastCheck < 5_000) return;
+    lastCheck = now;
     setTimeout(() => {
       void rustCore
         .sendRequest('wireguard_revalidate', {})

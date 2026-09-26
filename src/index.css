@@ -1012,6 +1012,15 @@ button,
   padding-top: 10px;
   border-top: 1px solid var(--line);
 }
+.wg-status-note, .wg-status-warning {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 10px;
+  font-size: 11px;
+}
+.wg-status-note { color: var(--muted); }
+.wg-status-warning { color: #a73b40; }
 
 .modal-heading {
   justify-content: space-between;

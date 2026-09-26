@@ -703,8 +703,14 @@ function DetailView({
   const [menuOpen, setMenuOpen] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
   const [wgStatus, setWgStatus] = useState<WireGuardStatus | null>(null);
+  const [wgStatusStale, setWgStatusStale] = useState(false);
   const endpoints = endpointForProfile(profile, t);
   const active = isActive(profile.state);
+
+  useEffect(() => {
+    setWgStatus(null);
+    setWgStatusStale(false);
+  }, [profile.id]);
   const proxy = profile.kind === 'Http' ? settings.http_proxy : settings.socks_proxy;
 
   const copyEndpoint = async (address: string) => {
@@ -720,15 +726,23 @@ function DetailView({
   useEffect(() => {
     if (profile.kind !== 'WireGuard' || !isActive(profile.state)) {
       setWgStatus(null);
+      setWgStatusStale(false);
       return;
     }
     let cancelled = false;
     const load = async () => {
       try {
         const status = await bridge()?.request<WireGuardStatus | null>('wireguard_status', { id: profile.id });
-        if (!cancelled && status) setWgStatus(status);
+        if (!cancelled) {
+          if (status) {
+            setWgStatus(status);
+            setWgStatusStale(false);
+          } else {
+            setWgStatusStale(true);
+          }
+        }
       } catch {
-        if (!cancelled) setWgStatus(null);
+        if (!cancelled) setWgStatusStale(true);
       }
     };
     void load();
@@ -858,6 +872,8 @@ function DetailView({
         </div>
         {profile.kind === 'WireGuard' && (
           <div className="wg-status-grid">
+            {wgStatusStale && wgStatus && <div className="wg-status-note"><AlertCircle size={14} />{t('detail.statusMayBeStale')}</div>}
+            {wgStatus?.health_warning && <div className="wg-status-warning"><AlertCircle size={14} />{t('detail.carrierMissing', { endpoint: wgStatus.health_warning.endpoint })}</div>}
             <KeyValue label={t('detail.actualInterface')} value={wgStatus?.interface_name ?? t('detail.shownAfterStart')} mono />
             <KeyValue label={t('detail.localPublicKey')} value={wgStatus?.public_key ? `${wgStatus.public_key.slice(0, 12)}…` : t('common.notConnected')} mono />
             {(wgStatus?.peers ?? []).map((peer) => (

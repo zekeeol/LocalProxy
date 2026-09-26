@@ -97,6 +97,7 @@ export type WireGuardStatus = {
   interface_name: string;
   listen_port: number;
   public_key: string | null;
+  health_warning?: { code: string; endpoint: string } | null;
   peers: {
     public_key: string;
     endpoint: string | null;

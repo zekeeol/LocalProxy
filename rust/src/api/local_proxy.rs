@@ -124,6 +124,14 @@ pub struct WireGuardStatus {
     pub listen_port: u16,
     pub public_key: Option<String>,
     pub peers: Vec<WireGuardPeerStatus>,
+    #[serde(default)]
+    pub health_warning: Option<WireGuardHealthWarning>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireGuardHealthWarning {
+    pub code: String,
+    pub endpoint: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

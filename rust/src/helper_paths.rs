@@ -15,7 +15,7 @@ pub const HELPER_PID_FILE: &str = "localproxy-wireguard.pid";
 pub const HELPER_LOCK_FILE: &str = "localproxy-wireguard.lock";
 /// Bumped whenever the helper protocol or its lifecycle guarantees change:
 /// the core only reuses a helper that answers with this exact version.
-pub const HELPER_PROTOCOL_VERSION: u32 = 3;
+pub const HELPER_PROTOCOL_VERSION: u32 = 4;
 
 /// Directory holding the socket, pid file and lock file.
 pub fn socket_dir() -> PathBuf {

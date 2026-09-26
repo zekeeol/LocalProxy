@@ -14,6 +14,7 @@
     "build:electron": "vite build && tsc -p electron/tsconfig.json",
     "build:rust": "cargo build --release --manifest-path rust/Cargo.toml",
     "build:mac": "npm run build:rust && npm run build:electron && electron-builder --mac --publish never",
+    "build:mac:adhoc": "npm run build:rust && npm run build:electron && electron-builder --mac --publish never --config.afterSign=./scripts/adhoc-sign.cjs && node scripts/cleanup-mac-build.cjs",
     "lint": "tsc --noEmit",
     "package": "npm run build:mac",
     "preview": "vite preview"
