@@ -23,19 +23,18 @@ migrate_working_dir/
 # is commented out by default.
 #.vscode/
 
-# Electron / Vite build artifacts
+# Local caches from earlier builds
 /node_modules/
 /dist/
 /dist-electron/
-/release/
 /build/
-
-# Local build caches
 .dart_tool/
 .flutter-plugins-dependencies
 /macos/
 
-# Rust build artifacts
+# Native build artifacts
+/release/
+/gpui-app/target/
 /rust/target/
 
 # Symbolication related

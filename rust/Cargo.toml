@@ -6,10 +6,6 @@ edition = "2021"
 authors = ["LocalProxy Team"]
 description = "LocalProxy Rust networking core"
 
-[[bin]]
-name = "local_proxy_core"
-path = "src/main.rs"
-
 [lib]
 crate-type = ["rlib", "cdylib", "staticlib"]
 

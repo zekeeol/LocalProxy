@@ -363,6 +363,9 @@ fn controller() -> Arc<AppController> {
 }
 
 fn data_directory() -> PathBuf {
+    if let Some(path) = std::env::var_os("LOCALPROXY_DATA_DIR") {
+        return PathBuf::from(path);
+    }
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(CONFIG_DIRECTORY)
@@ -1207,6 +1210,31 @@ pub(crate) fn stop_profile(id: &str) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// Stop services and wait briefly for privileged tunnel cleanup on application exit.
+pub(crate) fn shutdown() {
+    let controller = controller();
+    let ids = controller
+        .active
+        .lock()
+        .map(|active| active.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    for id in ids {
+        let _ = stop_profile(&id);
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+    while std::time::Instant::now() < deadline {
+        if controller
+            .active
+            .lock()
+            .map(|active| active.is_empty())
+            .unwrap_or(true)
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
 }
 
 pub(crate) fn confirm_host_key(id: &str, fingerprint: &str, accepted: bool) -> Result<(), String> {

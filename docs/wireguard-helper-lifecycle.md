@@ -210,7 +210,7 @@ helper 启动后做两件事：
 
 ### 5.6 唤醒 / 解锁后自愈（修 R5）
 
-- `electron/main.ts` 订阅 `powerMonitor` 的 `resume` 与 `unlock-screen`，延迟 3 秒发送新的 RPC `wireguard_revalidate`；
+- GPUI 原生应用订阅系统唤醒和屏幕解锁，延迟 3 秒直接调用 `wireguard_revalidate`；窗口重新激活时也检查已有隧道。无需启动新的 helper；
 - 核心 `core::wireguard_revalidate()`：遍历运行中的 WireGuard profile。唤醒时有 keepalive 的 peer 若握手过旧，或没有 keepalive 的 peer 无法通过空闲握手判断健康，就通过 helper 的 `Refresh` 指令重发 UAPI 配置，保留 utun、路由和 DNS；配置变更或 helper 已丢失隧道时才完整 `Setup`。
 - 守护循环只对配置了 `PersistentKeepalive` 的 peer 按握手新鲜度判断；连续 3 个周期（15 秒）没有新握手、且隧道已运行超过 30 秒时，先 `Refresh`，等待 20 秒仍无握手才重建设备。重建间隔至少 60 秒；连续 5 次后降为每 5 分钟尝试一次，握手恢复后重置计数。
 - 连续 3 次重建后，如果 Endpoint 指向 localhost，核心通过 `lsof` 检查对应 UDP 承载端口（排除 WireGuard helper 本身的 socket）。端口未监听时暂停无效的 wg 重建，在详情面板和运行日志中提示检查 wstunnel 或其他承载隧道。
@@ -238,11 +238,9 @@ helper 是 root 进程，而它的 socket 与 token 都位于用户会话可读�
 ## 6. 验证
 
 ```bash
-cargo test --manifest-path rust/Cargo.toml          # 当前 43 个测试
-cargo clippy --manifest-path rust/Cargo.toml --all-targets -- -D warnings
-cargo build --release --manifest-path rust/Cargo.toml
-npm run lint && npm run build:electron
-npm run build:mac:adhoc                         # 生成 ad hoc 签名的 arm64 DMG
+(cd rust && cargo test --locked)
+(cd gpui-app && cargo test --locked)
+./scripts/build-native.sh debug                 # 生成本地 ad hoc 签名的 .app
 ```
 
 新增的回归测试覆盖（helper 侧校验、单实例锁、路由/DNS 归属、健康阈值等）：单实例锁互斥、pid 文件里是死进程时仍能接管、锁被占用时给出“单实例”错误、路由 family/kind 推导、地址族映射、DNS 归属比较（忽略顺序与大小写）、健康判定阈值、时间戳格式、helper 与核心的 pid/lock 路径一致。

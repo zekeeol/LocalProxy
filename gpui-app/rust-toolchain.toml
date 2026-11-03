@@ -1,0 +1,4 @@
+[toolchain]
+# GPUI Kit 0.8.x uses std::hint::cold_path, which is stable from Rust 1.95 on.
+# The networking core in ../rust keeps its own pinned toolchain.
+channel = "1.99.1"
