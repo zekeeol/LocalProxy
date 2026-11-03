@@ -313,6 +313,11 @@ pub fn init_app() {
     core::init();
 }
 
+/// Stop running services before the desktop process exits.
+pub fn shutdown() {
+    core::shutdown();
+}
+
 pub fn list_profiles() -> Result<Vec<ProfileSummary>, String> {
     core::list_profiles()
 }

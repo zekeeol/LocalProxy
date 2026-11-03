@@ -1,0 +1,42 @@
+[package]
+name = "localproxy-app"
+version = "0.4.0"
+edition = "2021"
+publish = false
+description = "LocalProxy native macOS UI built with GPUI Kit"
+authors = ["LocalProxy Team"]
+default-run = "LocalProxy"
+
+[[bin]]
+name = "LocalProxy"
+path = "src/main.rs"
+
+[dependencies]
+gpui-kit = "0.8.1"
+
+# The networking core is reused directly, in-process. The former Electron
+# sidecar protocol (`rust/src/main.rs`) is no longer needed by the native UI.
+local_proxy_rust = { path = "../rust" }
+
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+dirs = "6"
+rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sys-locale = "0.3"
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "NSDistributedNotificationCenter", "NSNotification", "NSOperation", "NSString"] }
+
+[profile.dev.package]
+gpui-pre = { opt-level = 3 }
+gpui-component = { opt-level = 3 }
+gpui-base = { opt-level = 3 }
+gpui-kit = { opt-level = 3 }
+gpui-kit-assets = { opt-level = 3 }
+gpui-pre-platform = { opt-level = 3 }
+rustybuzz = { opt-level = 3 }
+taffy = { opt-level = 3 }
+ttf-parser = { opt-level = 3 }
