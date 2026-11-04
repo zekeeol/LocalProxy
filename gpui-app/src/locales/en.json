@@ -144,6 +144,8 @@
     "tlsVerify": "TLS certificate verification",
     "tlsOffNote": "Disabled (matches the original command)",
     "actualInterface": "Actual interface",
+    "statusLoading": "Loading WireGuard status…",
+    "statusUnavailable": "WireGuard status unavailable; retrying shortly",
     "statusMayBeStale": "Status may be outdated; retrying",
     "carrierMissing": "Local UDP carrier {{endpoint}} is not listening. Check wstunnel or the transport tunnel.",
     "shownAfterStart": "Shown after start",

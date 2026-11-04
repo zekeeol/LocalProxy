@@ -5,7 +5,7 @@ use gpui::prelude::*;
 use gpui::{div, px, AnyElement, Context, IntoElement};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
-use local_proxy_rust::api::local_proxy::ProxyType;
+use local_proxy_rust::api::local_proxy::{ProxyType, ServiceState};
 
 pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
     let Some(profile) = shell.selected.as_ref() else {
@@ -352,10 +352,11 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                 wg.peers.len().to_string(),
                 false,
             ));
-        if shell.wg_stale {
-            config = config.child(w::field_hint(shell.t("detail.statusMayBeStale")));
-        }
-        if let Some(status) = &shell.wg_status {
+        if let Some(snapshot) = shell.wg_statuses.get(&profile.id) {
+            if snapshot.is_stale(std::time::Instant::now(), crate::app::WIREGUARD_POLL * 2) {
+                config = config.child(w::field_hint(shell.t("detail.statusMayBeStale")));
+            }
+            let status = &snapshot.status;
             if let Some(warning) = &status.health_warning {
                 config = config.child(w::error_banner(
                     shell.tp("detail.carrierMissing", &[("endpoint", &warning.endpoint)]),
@@ -398,6 +399,13 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                     true,
                 ));
             }
+        } else if profile.state == ServiceState::Running {
+            let message = if shell.wg_statuses.is_pending(&profile.id) {
+                "detail.statusLoading"
+            } else {
+                "detail.statusUnavailable"
+            };
+            config = config.child(w::field_hint(shell.t(message)));
         }
     }
     page = page.child(config);
