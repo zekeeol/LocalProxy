@@ -11,6 +11,7 @@ use crate::theme;
 use crate::views;
 use crate::views::editor::ProfileEditor;
 use crate::views::settings::SettingsView;
+use crate::wireguard_status::StatusCache;
 use gpui::prelude::*;
 use gpui::{
     div, px, AnyElement, Context, Entity, IntoElement, Render, SharedString, Task, WeakEntity,
@@ -18,11 +19,11 @@ use gpui::{
 };
 use local_proxy_rust::api::local_proxy::{
     self, AppSettingsDraft, AppSettingsView, Endpoint, EventKind, ProfileDraft, ProfileSummary,
-    ProfileView, ProxyEvent, ProxyType, ServiceState, WireGuardStatus,
+    ProfileView, ProxyEvent, ProxyType, ServiceState,
 };
 
 const POLL_INTERVAL: Duration = Duration::from_millis(120);
-const WIREGUARD_POLL: Duration = Duration::from_secs(5);
+pub(crate) const WIREGUARD_POLL: Duration = Duration::from_secs(5);
 const TOAST_LIFETIME: Duration = Duration::from_millis(3800);
 
 /// Dialogs that don't need their own entity.
@@ -56,8 +57,7 @@ pub struct AppShell {
     pub language_menu_open: bool,
 
     // ---- wireguard status ----------------------------------------------------
-    pub wg_status: Option<WireGuardStatus>,
-    pub wg_stale: bool,
+    pub wg_statuses: StatusCache,
 
     // ---- bookkeeping ---------------------------------------------------------
     next_wireguard_poll: Instant,
@@ -86,8 +86,7 @@ impl AppShell {
             settings_view: None,
             menu_open: false,
             language_menu_open: false,
-            wg_status: None,
-            wg_stale: false,
+            wg_statuses: StatusCache::default(),
             next_wireguard_poll: Instant::now(),
             next_toast_id: 1,
             _poll_task: Task::ready(()),
@@ -151,17 +150,36 @@ impl AppShell {
         let next_id = keep.or_else(|| self.profiles.first().map(|profile| profile.id.clone()));
         self.selected_id = next_id.clone();
         self.selected = next_id.and_then(|id| local_proxy::get_profile(id).ok());
+        self.wg_statuses.retain(|id| {
+            self.profiles.iter().any(|profile| {
+                profile.id == id
+                    && profile.kind == ProxyType::WireGuard
+                    && profile.state == ServiceState::Running
+            })
+        });
+        let running_wireguard = self.selected.as_ref().and_then(|profile| {
+            (profile.kind == ProxyType::WireGuard && profile.state == ServiceState::Running)
+                .then(|| profile.id.clone())
+        });
+        if let Some(id) = running_wireguard {
+            self.request_wireguard_status(&id, Instant::now());
+        }
         self.refreshing = false;
         cx.notify();
     }
 
     pub fn select_profile(&mut self, id: String, cx: &mut Context<Self>) {
-        self.selected_id = Some(id.clone());
-        match local_proxy::get_profile(id) {
+        let changed = self.selected_id.as_deref() != Some(id.as_str());
+        match local_proxy::get_profile(id.clone()) {
             Ok(profile) => {
-                self.wg_status = None;
-                self.wg_stale = false;
+                let request_status = profile.kind == ProxyType::WireGuard
+                    && profile.state == ServiceState::Running
+                    && (changed || self.wg_statuses.get(&id).is_none());
+                self.selected_id = Some(id.clone());
                 self.selected = Some(profile);
+                if request_status {
+                    self.request_wireguard_status(&id, Instant::now());
+                }
             }
             Err(error) => self.notify(error, ToastTone::Error, cx),
         }
@@ -410,6 +428,13 @@ impl AppShell {
         })
     }
 
+    fn request_wireguard_status(&mut self, id: &str, now: Instant) {
+        if let Some(request_id) = self.wg_statuses.begin(id) {
+            bridge::request_wireguard_status(id, request_id);
+        }
+        self.next_wireguard_poll = now + WIREGUARD_POLL;
+    }
+
     fn pump(&mut self, cx: &mut Context<Self>) {
         let mut changed = false;
         for update in bridge::drain() {
@@ -420,21 +445,18 @@ impl AppShell {
                 }
                 CoreUpdate::WireGuardStatus {
                     profile_id,
+                    request_id,
                     status,
                     error,
                 } => {
-                    let still_selected = self
-                        .selected_id
-                        .as_deref()
-                        .map(|id| id == profile_id)
-                        .unwrap_or(false);
-                    if still_selected {
-                        if error.is_some() {
-                            self.wg_stale = self.wg_status.is_some();
-                        } else {
-                            self.wg_stale = status.is_none() && self.wg_status.is_some();
-                            self.wg_status = status;
-                        }
+                    let result = match error {
+                        Some(error) => Err(error),
+                        None => Ok(status),
+                    };
+                    if self
+                        .wg_statuses
+                        .finish(&profile_id, request_id, result, Instant::now())
+                    {
                         changed = true;
                     }
                 }
@@ -450,14 +472,14 @@ impl AppShell {
 
         // Poll WireGuard helper status while a running WireGuard profile is
         // selected (mirrors the 5s poll of the Electron UI).
-        if let Some(profile) = &self.selected {
-            if profile.kind == ProxyType::WireGuard
-                && state::is_active(&profile.state)
-                && now >= self.next_wireguard_poll
-            {
-                bridge::request_wireguard_status(&profile.id);
-                self.next_wireguard_poll = now + WIREGUARD_POLL;
-            }
+        let due_wireguard = self.selected.as_ref().and_then(|profile| {
+            (profile.kind == ProxyType::WireGuard
+                && profile.state == ServiceState::Running
+                && now >= self.next_wireguard_poll)
+                .then(|| profile.id.clone())
+        });
+        if let Some(id) = due_wireguard {
+            self.request_wireguard_status(&id, now);
         }
 
         if changed {
@@ -467,6 +489,11 @@ impl AppShell {
 
     fn handle_proxy_event(&mut self, event: ProxyEvent, cx: &mut Context<Self>) {
         self.engine_ready = true;
+        let selected_was_running = self.selected.as_ref().is_some_and(|profile| {
+            profile.id == event.profile_id
+                && profile.kind == ProxyType::WireGuard
+                && profile.state == ServiceState::Running
+        });
         for profile in &mut self.profiles {
             if profile.id == event.profile_id {
                 profile.state = event.state.clone();
@@ -495,6 +522,17 @@ impl AppShell {
                 } else {
                     None
                 };
+            }
+        }
+        if matches!(event.kind, EventKind::State) {
+            if event.state != ServiceState::Running {
+                self.wg_statuses.invalidate(&event.profile_id);
+            } else if !selected_was_running
+                && self.selected.as_ref().is_some_and(|profile| {
+                    profile.id == event.profile_id && profile.kind == ProxyType::WireGuard
+                })
+            {
+                self.request_wireguard_status(&event.profile_id, Instant::now());
             }
         }
         if matches!(event.kind, EventKind::HostKey) {

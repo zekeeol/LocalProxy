@@ -175,7 +175,13 @@ fn profile_card(
         .border_color(rgb(0xd8e8ea))
         .bg(rgba(0xffffffb8))
         .cursor_pointer()
-        .hover(|style| style.border_color(rgb(0xb9d9dd)).bg(theme::panel()))
+        .hover(move |style| {
+            if selected {
+                style.border_color(rgb(0xa9dddc)).bg(rgb(0xbfe8e5))
+            } else {
+                style.border_color(rgb(0xb9d9dd)).bg(theme::panel())
+            }
+        })
         .on_click(cx.listener(move |this, _, _, cx| {
             this.select_profile(id.clone(), cx);
         }))

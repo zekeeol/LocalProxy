@@ -15,6 +15,7 @@ mod state;
 mod theme;
 mod views;
 mod widgets;
+mod wireguard_status;
 
 use gpui::px;
 use gpui::size;

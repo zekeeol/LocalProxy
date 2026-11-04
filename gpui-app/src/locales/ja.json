@@ -144,6 +144,8 @@
     "tlsVerify": "TLS 証明書検証",
     "tlsOffNote": "無効（元のコマンドと同じ）",
     "actualInterface": "実際のインターフェース",
+    "statusLoading": "WireGuard の状態を読み込み中…",
+    "statusUnavailable": "WireGuard の状態を取得できません。まもなく再試行します",
     "statusMayBeStale": "状態が古い可能性があります。再試行中",
     "carrierMissing": "ローカル UDP 搬送ポート {{endpoint}} が待ち受けていません。wstunnel または搬送トンネルを確認してください。",
     "shownAfterStart": "起動後に表示",
